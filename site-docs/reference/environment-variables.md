@@ -497,6 +497,22 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | `REGISTRY_HEALTH_INTERVAL_MS` | `60000` | Portal: interval between coordinator health checks. |
 | `REGISTRY_FALLBACK_URLS` | `https://coordinator.edgecoder.io` | Portal: comma-separated URLs clients use when nothing in the pool is usable. |
 
+## Ledger service (outside coordinators' billing)
+
+Phase 4 of the outside-coordinator plan (`src/ledger-service/`, `docs/discovery.md` "Billing for outside coordinators"). EdgeCoder's seeds hold the balances and the shared Postgres; an outside coordinator bills its network calls through them, signed with its own coordinator key, and never holds a balance or a database credential. A member is billed only when the signed registry lists it `active` (past probation) with billing turned on by the owner's passkey (Settings > Admin > Coordinator registry, `POST /admin/network/registry/billing`).
+
+| Variable | Default | Description |
+|---|---|---|
+| `LEDGER_SERVICE_ENABLED` | `false` | Seed coordinator: serve `POST /ledger/v1/reserve`, `/settle`, `/refund` and `/balance` to outside coordinators. Off: every call is refused (503). |
+| `LEDGER_SERVICE_ROUTING_SHARE_BPS` | `4000` | Seed: the routing coordinator operator's share of a call's network fee, in basis points of the fee (4000 = 40 %, 2 % of the call at a 5 % `NETWORK_FEE_BPS`). Written as its own `routing_fee:<task>` earn row on `acct-<operator>`, payable like host earnings; EdgeCoder's fee pool keeps the rest. EdgeCoder's own coordinators keep the whole fee. |
+| `LEDGER_SERVICE_MAX_OPEN_RESERVES` | `200` | Seed: most open (not yet closed) reserves one outside coordinator may hold. Past it a reserve is refused (429) and counted as a dispute. |
+| `LEDGER_SERVICE_MAX_OPEN_RESERVE_MSAT` | `50000000` | Seed: most msat one outside coordinator may hold in open reserves. |
+| `LEDGER_SERVICE_MAX_MSAT_PER_HOUR` | `200000000` | Seed: most msat one outside coordinator may reserve in a rolling hour. |
+| `LEDGER_SERVICE_OVERFLOW_MAX_PCT` | `100` | Seed: a model call's cost past its reserve (taken from the buyer's balance at settle, up to the buyer's own `maxCSats`) is at most this percentage of the reserve. A reported cost above the reserve plus this bound is refused and suspends billing for that coordinator. |
+| `LEDGER_SERVICE_MAX_DISPUTES` | `5` | Seed: refused calls (settle on a closed task, refund of an unknown task, over a reserve cap, bad buyer proof) per coordinator in 24 h before its billing is suspended. A settle without a valid agent-signed work claim, a cost over the cap, or touching another coordinator's task suspends at once. `POST /admin/ledger-service/members/enable` (admin token) lifts it; `/disable` stops a member's billing on every seed at once. |
+| `LEDGER_SERVICE_RESERVE_TTL_MS` | `21600000` | Seed: an open task older than this is closed and its unused reserve refunded (its coordinator went away). |
+| `LEDGER_SERVICE_URL` | unset | Outside coordinator: bill reserves, settles and refunds through this ledger service (e.g. `https://coordinator.edgecoder.io`) instead of its own database; its own database (if any) keeps everything else. Unset in production with no `DATABASE_URL`: the platform URL. EdgeCoder's seeds leave it unset. |
+
 ## Coordinator: identity, leases and hardware checks
 
 | Variable | Default | Description |

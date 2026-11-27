@@ -567,7 +567,9 @@ export class CoordinatorRegistryService {
           admission: m.admission,
           admittedAtMs: m.admittedAtMs ?? m.createdAtMs,
           health,
-          status
+          status,
+          // Phase 4: the ledger service bills for an active community member with this set.
+          ...(m.operatorKind === "community" && m.billingEnabled === true ? { billingEnabled: true } : {})
         };
       });
     return { v: 1, network: this.network, issuedAtMs, expiresAtMs: issuedAtMs + this.ttlMs, coordinators, fallbackUrls: this.fallbackUrls };
@@ -688,6 +690,8 @@ export class CoordinatorRegistryService {
         cleanDayDirty: true,
         identityFailingSinceMs: null,
         suspensionReason: null,
+        // Billing is approved on its own, after probation (setBilling).
+        billingEnabled: false,
         updatedAtMs: now
       };
       const detail: Record<string, unknown> = { from: row.status, confirmedWith: "passkey" };
@@ -711,12 +715,40 @@ export class CoordinatorRegistryService {
     const saved = await this.store.transact(nodeId, (row) => {
       if (!row || row.status === "suspended") return { member: null };
       return {
-        member: { ...row, status: "suspended", suspensionReason: reason, updatedAtMs: now },
+        member: { ...row, status: "suspended", suspensionReason: reason, billingEnabled: false, updatedAtMs: now },
         audit: this.audit(actorUserId, "suspended", nodeId, { from: row.status, reason })
       };
     });
     await this.load();
     return saved ? { ok: true, member: saved } : { ok: false, status: 404, error: "not_found" };
+  }
+
+  /**
+   * Turn ledger-service billing on or off for a community member (phase 4). Turning it on needs the
+   * owner's passkey assertion for this change (checked by the caller) and a member on probation or
+   * active; it takes effect once the member is active. Turning it off works in any status. The
+   * signed registry carries the flag; seeds read it at their next refresh (and can stop billing for
+   * a member at once on their own: POST /admin/ledger-service/members/disable).
+   */
+  async setBilling(nodeId: string, actorUserId: string, enabled: boolean): Promise<ServiceResult<{ member: StoredMember }>> {
+    await this.load();
+    const cur = this.cache.find((m) => m.nodeId === nodeId);
+    if (!cur) return { ok: false, status: 404, error: "not_found" };
+    if (cur.operatorKind !== "community") return { ok: false, status: 409, error: "platform_coordinator" };
+    if (enabled && cur.status !== "probation" && cur.status !== "active") return { ok: false, status: 409, error: "not_admitted", problems: [cur.status] };
+    if ((cur.billingEnabled === true) === enabled) return { ok: true, member: cur };
+    const now = this.now();
+    const saved = await this.store.transact(nodeId, (row) => {
+      if (!row || (row.billingEnabled === true) === enabled) return { member: null };
+      if (enabled && row.status !== "probation" && row.status !== "active") return { member: null };
+      return {
+        member: { ...row, billingEnabled: enabled, updatedAtMs: now },
+        audit: this.audit(actorUserId, enabled ? "billing_enabled" : "billing_disabled", nodeId, { status: row.status, ...(enabled ? { confirmedWith: "passkey" } : {}) })
+      };
+    });
+    await this.load();
+    if (!saved || (saved.billingEnabled === true) !== enabled) return { ok: false, status: 409, error: "changed_concurrently" };
+    return { ok: true, member: saved };
   }
 
   /**
@@ -821,7 +853,8 @@ function memberView(m: StoredMember) {
     admittedAtMs: m.admittedAtMs,
     probationStartedAtMs: m.probationStartedAtMs,
     cleanDays: m.cleanDays,
-    suspensionReason: m.suspensionReason
+    suspensionReason: m.suspensionReason,
+    billingEnabled: m.billingEnabled === true
   };
 }
 
@@ -836,6 +869,7 @@ function memberView(m: StoredMember) {
  *   POST /admin/network/registry/passkey-options           owner: a passkey challenge for one approval
  *   POST /admin/network/registry/approve                   owner: { nodeId, publicKeyFingerprint?, challengeId, response }
  *   POST /admin/network/registry/suspend                   owner: { nodeId, reason }
+ *   POST /admin/network/registry/billing                   owner: { nodeId, enabled, challengeId?, response? } (passkey to turn on)
  */
 export function registerRegistryRoutes(app: FastifyInstance, { service, requireAdmin, currentUser, passkey }: RegistryRouteDeps): void {
   app.get("/network/registry", async (_req, reply) => {
@@ -921,6 +955,30 @@ export function registerRegistryRoutes(app: FastifyInstance, { service, requireA
     const v = await passkey.verify(admin, { challengeId: body.data.challengeId, credentialId: body.data.credentialId, response: body.data.response });
     if (!v.ok) return reply.code(v.status).send({ error: v.error });
     const r = await service.approve(body.data.nodeId, admin.userId, { publicKeyFingerprint: body.data.publicKeyFingerprint });
+    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
+  });
+
+  app.post("/admin/network/registry/billing", async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
+    if (!admin) return;
+    const body = z
+      .object({
+        nodeId: z.string().min(1).max(256),
+        enabled: z.boolean(),
+        challengeId: z.string().min(10).max(64).optional(),
+        credentialId: z.string().max(1024).optional(),
+        response: z.unknown().optional()
+      })
+      .safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid_request" });
+    if (body.data.enabled) {
+      // Same as an approval: the owner's passkey, asserted for this change.
+      if (!passkey) return reply.code(503).send({ error: "passkeys_not_configured" });
+      if (!body.data.challengeId || body.data.response === undefined) return reply.code(403).send({ error: "passkey_required", detail: "Confirm billing with your passkey." });
+      const v = await passkey.verify(admin, { challengeId: body.data.challengeId, credentialId: body.data.credentialId, response: body.data.response });
+      if (!v.ok) return reply.code(v.status).send({ error: v.error });
+    }
+    const r = await service.setBilling(body.data.nodeId, admin.userId, body.data.enabled);
     return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
   });
 

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { payoutsPausedByEnv } from "../../../economy/payout-safeguards.js";
 import type { CoordinatorApp } from "../app.js";
 import { queue, mesh } from "../context.js";
+import { registerLedgerServiceAdminRoutes } from "../ledger-service.js";
 import { agentCapabilities, behaviorTracker, anomalyDetector, autoBlacklister } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
 import { payoutPause, payoutLimits, payoutReconcileConfig, payoutReconciler, resolvePendingPayouts } from "../payouts.js";
@@ -121,6 +122,9 @@ export function registerAdminRoutes(app: CoordinatorApp): void {
   admin.addHook("onRequest", async (req, reply) => {
     if (!authorizeAdmin(req, reply)) return reply;
   });
+
+  // Ledger service (phase 4): one outside coordinator's billing here (see, stop at once, resume).
+  registerLedgerServiceAdminRoutes(admin as never);
 
   admin.get("/admin/dashboard", async (req, reply) => {
     if (!authorizeAdmin(req, reply)) return;

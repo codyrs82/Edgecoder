@@ -8,6 +8,7 @@ import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, reserveTaskCredits, rewardAccountForAgent, taskReserveKey } from "../../../credits/store.js";
+import { buyerProofFrom } from "../../../ledger-service/protocol.js";
 import { cSatsPerMTokens, cSatsToMsat, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
 import { cloudModelSpec, isCloudModel, orderCloudModels } from "../../../cloud-host/catalog.js";
@@ -759,6 +760,11 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
         : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
       retryAfterSec,
     });
+}
+
+/** The most a model call's cost may reach with the overflow past its reserve: the buyer's maxCSats, else no bound here. */
+function inferenceOverflowCapMsat(reserve: number, maxCSats: number | undefined): number {
+  return maxCSats !== undefined && Number.isFinite(maxCSats) && maxCSats > 0 ? Math.max(reserve, Math.floor(cSatsToMsat(maxCSats))) : Number.MAX_SAFE_INTEGER;
 }
 
 /** Whose /inference/models this is: the account the portal names, or the signing agent's owner. */
@@ -1595,7 +1601,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // B2: the row and the debit go in one round trip (reserveTaskCredits); a refused debit writes
       // neither, so there is no billing row to close afterwards.
       try {
-        const billingRow = await reserveTaskCredits({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() }, msatToCSats(reserve), "inference_reserve", { idempotencyKey: taskReserveKey(body.taskId) });
+        // Through the ledger service (an outside coordinator), the buyer's portal-signed request goes
+        // along as proof, and the cost cap bounds the overflow there too.
+        const billingRow = await reserveTaskCredits({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() }, msatToCSats(reserve), "inference_reserve", { idempotencyKey: taskReserveKey(body.taskId), reserveMsat: reserve, overflowCapMsat: inferenceOverflowCapMsat(reserve, maxCSats), buyerProof: buyerProofFrom(req as any) });
         if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1611,7 +1619,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
     }
     // A cost past the reserve is taken from the balance at settle, up to the buyer's maxCSats (results.ts).
-    const overflowCapMsat = maxCSats !== undefined && Number.isFinite(maxCSats) && maxCSats > 0 ? Math.max(reserve, Math.floor(cSatsToMsat(maxCSats))) : Number.MAX_SAFE_INTEGER;
+    const overflowCapMsat = inferenceOverflowCapMsat(reserve, maxCSats);
     taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now(), ...(nwcSpot ? { nwc: true } : reserve > 0 ? { overflowCapMsat } : {}) });
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",

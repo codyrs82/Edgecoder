@@ -365,6 +365,25 @@ through", as the coordinator, its region and its latency.
 4. **Rotate the key** by pinning the new key next to the old one (the list takes several keys),
    releasing, switching `REGISTRY_SIGNING_KEY_PEM`, and dropping the old key in a later release.
 
+### Billing for outside coordinators (ledger service)
+
+EdgeCoder runs the ledger for every coordinator (phase 4 of the outside-coordinator plan; `src/ledger-service/`). The seeds hold the buyers' balances and the shared Postgres, credit hosts and pay them from EdgeCoder's Lightning node as before. An outside coordinator never holds a balance or `DATABASE_URL` billing of its own: with `LEDGER_SERVICE_URL` set (or no `DATABASE_URL` in production) its reserves, settles and refunds go to the seeds' API, each request signed with its own coordinator key (the signed peer request of #632). Its own database, if it has one, keeps its other state.
+
+| Route (seeds) | What it does |
+|---|---|
+| `POST /ledger/v1/reserve` | Sets aside msat from a buyer for one task (`reserveTaskBillingDebit`: the buyer's credit lock, balance check, billing row and debit under the reserve's idempotency key). A new task needs the buyer's proof: the portal's signed request the outside coordinator received (made for that member's origin, naming the account, single-use). A top-up of its own open task needs none. |
+| `POST /ledger/v1/settle` | Charges one execution: the base cost from the reserve, any overflow past it from the buyer's balance up to the task's cost cap (#618), the host's earning, the fee pool and the routing share, in one transaction (`persistContributionWithOverflow`). It must carry the agent's signed work claim for that subtask. The seed writes the `earnings_accrual` record `/ledger/verify` checks. |
+| `POST /ledger/v1/refund` | Closes the task: what it set aside and did not use goes back to the buyer (the one refund row), counted on the ledger, not taken from the caller. |
+| `POST /ledger/v1/balance` | Admission only: whether the buyer holds at least an amount (with the buyer's proof). |
+
+Who may call: a community member of the verified signed registry, `active` (past the 7-day probation), with `billingEnabled` set by the owner's passkey approval (the same flow as approval), and not suspended on the seeds. `LEDGER_SERVICE_ENABLED` (default off) turns the whole service on.
+
+The network fee is split at settle: `LEDGER_SERVICE_ROUTING_SHARE_BPS` (default 4000, 40 % of the 5 % fee, so 2 % of the call) to the routing coordinator's operator account (`acct-<operator>`, reason `routing_fee:<task>`, payable like host earnings), the rest to EdgeCoder's fee pool. The seeds' own calls keep the whole fee. `/ledger/verify` checks the pool rows against the fee less the routing share, and the routing rows against what each accrual recorded.
+
+Limits per outside coordinator: caps on open reserves and on msat reserved per hour; a cost never above the reserve plus the overflow bound (`LEDGER_SERVICE_OVERFLOW_MAX_PCT`, under the buyer's own ceiling); a settle without a valid agent claim, a cost over the cap, a claim or host that disagrees with what the shared database knows about the agent, or touching another coordinator's task suspends its billing at once and raises an alert (`ledger_service_member_suspended`); other refusals count as disputes and `LEDGER_SERVICE_MAX_DISPUTES` in a day suspend it too. The owner can stop a member's billing on every seed at once (`POST /admin/ledger-service/members/disable`, admin token), lift a suspension (`/enable`), or turn billing off in the registry (no passkey needed to turn it off). Open tasks older than `LEDGER_SERVICE_RESERVE_TTL_MS` are closed and refunded by the seeds.
+
+Not in this phase: subtasks offered between coordinators are not paid through the service, and an outside coordinator bills only calls the portal sent it (the buyer's proof). Federation (per-operator ledgers that reconcile) comes later.
+
 ### Latency DNS (later ops step)
 
 `coordinator.edgecoder.io` is a plain DNS record today, so a client's first contact always

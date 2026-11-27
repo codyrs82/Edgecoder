@@ -124,6 +124,12 @@ export class RegistryTrust {
     return Boolean(e && memberTrusted(e) && fingerprintMatches(e.publicKeyFingerprint, publicKeyPem));
   };
 
+  /** The verified, unexpired registry's entry for a coordinator (null when none is held or it is not listed). */
+  member(peerId: string): RegistryEntry | null {
+    this.maybeRefresh();
+    return this.entry(peerId) ?? null;
+  }
+
   /** How the registry lists a coordinator (null when it does not, or no registry is held). */
   listing(peerId: string): RegistryListing | null {
     const e = this.entry(peerId);

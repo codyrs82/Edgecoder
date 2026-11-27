@@ -9,7 +9,8 @@ import { request } from "undici";
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
-import { accruePricedJobWithOverflow, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
+import { accruePricedJobWithOverflow, refundTaskReserve, refundTxId, remoteLedger, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
+import type { SignedAgentReceiptClaim } from "../../receipts/receipt.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
@@ -455,6 +456,13 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   claimedTradePrice.delete(r.subtaskId);
   // Paid out of a peer coordinator's charge (takeTaskBudget), not a reserve here.
   const peerOffered = peerOfferBudgetMsat.has(r.subtaskId);
+  if (peerOffered && remoteLedger()) {
+    // Billing through the ledger service covers this coordinator's own tasks only: another
+    // coordinator's subtask is not charged or paid here.
+    peerOfferBudgetMsat.delete(r.subtaskId);
+    app.log.info({ taskId, subtaskId: r.subtaskId }, "ledger_service_peer_subtask_unpaid");
+    return;
+  }
   // What is paid is what the requester is charged: taken out of what was set aside for the task
   // before the store is awaited, so results settling together cannot both spend it. Work nobody set
   // anything aside for (an anonymous task) earns nothing.
@@ -503,7 +511,9 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         hardwareWeight
       },
       { baseCostMsat: takenMsat, feeBps: NETWORK_FEE_BPS },
-      overflowWantMsat > 0 && billing ? { payerAccountId: billing.accountId, wantMsat: overflowWantMsat, reason: "inference_reserve" /* db/postgres.ts reserveReasonForKind("inference") */ } : undefined
+      overflowWantMsat > 0 && billing ? { payerAccountId: billing.accountId, wantMsat: overflowWantMsat, reason: "inference_reserve" /* db/postgres.ts reserveReasonForKind("inference") */ } : undefined,
+      // The ledger service (outside coordinators) charges only against the agent's signed claim.
+      { subtaskId: r.subtaskId, agentId: r.agentId, durationMs, receipt: (r.meta.report as { receipt?: SignedAgentReceiptClaim }).receipt }
     );
   } finally {
     // Nothing was paid (already recorded, #44, or the store failed): the task is not charged for it.
@@ -869,7 +879,8 @@ export async function refundTaskSubmit(taskId: string): Promise<boolean> {
   for (let attempt = 0; ; attempt++) {
     try {
       const unusedMsat = billing.nwc ? 0 : Math.max(0, billing.reservedMsat - billing.costMsat);
-      if (unusedMsat > 0) await grantCreditsIdempotent(billing.accountId, msatToCSats(unusedMsat), `task_submit_refund:${taskId}`, txId);
+      // Through the ledger service the task is closed there (it counts what is unused itself).
+      if (unusedMsat > 0 || (remoteLedger() && !billing.nwc && billing.reservedMsat > 0)) await refundTaskReserve(billing.accountId, taskId, unusedMsat);
       billing.refunded = true;
       await pgStore?.markTaskBillingSettled(taskId, Date.now(), identity.peerId).catch((err) => app.log.warn({ err, taskId }, "task_billing_settle_persist_failed"));
       const usage = usagePending.get(taskId);

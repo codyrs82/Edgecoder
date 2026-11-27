@@ -13,7 +13,8 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { signPayload } from "../../../mesh/peer.js";
 import { verifyForwardedResult } from "../../../mesh/peer-trust.js";
 import { buildAgentEnvelope, verifyForwardedAgentEnvelope } from "../../../mesh/forwarded-agent-envelope.js";
-import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
+import { DuplicateDebitError, remoteLedger, reserveTaskCredits, rewardAccountForAgent, spendCredits, taskReserveKey, topUpTaskReserve } from "../../../credits/store.js";
+import { buyerProofFrom } from "../../../ledger-service/protocol.js";
 import { msatToCSats } from "../../../economy/job-pricing.js";
 import { pgStore } from "../../../db/store.js";
 import { resolveRequestedClass, type ComputeClassId } from "../../../economy/compute-classes.js";
@@ -154,7 +155,8 @@ function jobSubmitter(taskId: string, subtaskId: string): string {
 }
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
-  if (!pgStore) return { ok: true };
+  // Billing through the ledger service: balances are EdgeCoder's, not in this database.
+  if (!pgStore || remoteLedger()) return { ok: true };
   const stats = await pgStore.creditContributionStats(accountId);
   const balance = await pgStore.creditBalance(accountId);
   const decision = contributionPolicyDecision(stats, balance, {
@@ -195,13 +197,17 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         // are read back from the ledger, so a row whose debit never happened refunds nothing.
         // The row is also the task id's one billing record network-wide: an id already billed on
         // the other seed, or by another account or kind, is refused before anything is debited.
-        if (pgStore) {
+        if (remoteLedger()) {
+          // An outside coordinator: the row and the reserve on EdgeCoder's ledger, in one call.
+          const billingRow = await reserveTaskCredits({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() }, msatToCSats(perSubtask), "task_reserve", { idempotencyKey: taskReserveKey(body.taskId), reserveMsat: perSubtask, buyerProof: buyerProofFrom(req as any) });
+          if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        } else if (pgStore) {
           const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() });
           if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
           insertedRow = billingRow === "inserted";
         }
         // One charge per task id network-wide: one reserve key per task id, whatever its kind.
-        await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
+        if (!remoteLedger()) await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
         taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
         usagePending.set(body.taskId, { id: body.taskId, accountId: body.submitterAccountId, atMs: Date.now(), kind: "job", placement: "network", computeClass: early.computeClass ?? undefined, ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}) });
       } catch (err) {
@@ -278,7 +284,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     if (billingEntry && payload.subtasks.length > 1) {
       const extra = billingEntry.perSubtaskReserveMsat * (payload.subtasks.length - 1);
       try {
-        await spendCredits(billingEntry.accountId, msatToCSats(extra), "task_reserve", body.taskId, { idempotencyKey: `task_reserve_topup:${body.taskId}` });
+        await topUpTaskReserve({ taskId: body.taskId, accountId: billingEntry.accountId, kind: "job", perSubtaskReserveMsat: billingEntry.perSubtaskReserveMsat }, extra, "task_reserve", `task_reserve_topup:${body.taskId}`);
         billingEntry.reservedMsat += extra;
       } catch (err) {
         await refundTaskSubmit(body.taskId);

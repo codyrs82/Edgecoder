@@ -48,6 +48,12 @@ export interface StoredMember {
   /** Since when /identity has answered with the wrong key or signature (null while it matches). */
   identityFailingSinceMs: number | null;
   suspensionReason: string | null;
+  /**
+   * Whether EdgeCoder's ledger service bills network calls for this member once it is active
+   * (phase 4). Set only by the owner's passkey approval; cleared by suspension and reinstatement.
+   * Absent: off.
+   */
+  billingEnabled?: boolean;
   updatedAtMs: number;
 }
 
@@ -190,6 +196,7 @@ CREATE TABLE IF NOT EXISTS portal_registry_members (
   suspension_reason TEXT,
   updated_at_ms BIGINT NOT NULL
 );
+ALTER TABLE portal_registry_members ADD COLUMN IF NOT EXISTS billing_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS portal_registry_members_operator_idx ON portal_registry_members (operator_user_id);
 CREATE TABLE IF NOT EXISTS portal_registry_audit (
   seq BIGSERIAL PRIMARY KEY,
@@ -246,6 +253,7 @@ function memberFromRow(r: Row): StoredMember {
     cleanDayDirty: r.clean_day_dirty === true,
     identityFailingSinceMs: numOrNull(r.identity_failing_since_ms),
     suspensionReason: (r.suspension_reason as string | null) ?? null,
+    billingEnabled: r.billing_enabled === true,
     updatedAtMs: Number(r.updated_at_ms)
   };
 }
@@ -301,18 +309,18 @@ export class PgRegistryStore implements RegistryStore {
     await c.query(
       `INSERT INTO portal_registry_members (node_id, key_fingerprints, urls, region, operator_user_id, operator_name, operator_kind, contact,
          admission, created_at_ms, admitted_at_ms, status, probation_started_at_ms, clean_days, clean_day_key, clean_day_dirty,
-         identity_failing_since_ms, suspension_reason, updated_at_ms)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         identity_failing_since_ms, suspension_reason, updated_at_ms, billing_enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        ON CONFLICT (node_id) DO UPDATE SET key_fingerprints = EXCLUDED.key_fingerprints, urls = EXCLUDED.urls, region = EXCLUDED.region,
          operator_user_id = EXCLUDED.operator_user_id, operator_name = EXCLUDED.operator_name, operator_kind = EXCLUDED.operator_kind,
          contact = EXCLUDED.contact, admission = EXCLUDED.admission, admitted_at_ms = EXCLUDED.admitted_at_ms, status = EXCLUDED.status,
          probation_started_at_ms = EXCLUDED.probation_started_at_ms, clean_days = EXCLUDED.clean_days, clean_day_key = EXCLUDED.clean_day_key,
          clean_day_dirty = EXCLUDED.clean_day_dirty, identity_failing_since_ms = EXCLUDED.identity_failing_since_ms,
-         suspension_reason = EXCLUDED.suspension_reason, updated_at_ms = EXCLUDED.updated_at_ms`,
+         suspension_reason = EXCLUDED.suspension_reason, updated_at_ms = EXCLUDED.updated_at_ms, billing_enabled = EXCLUDED.billing_enabled`,
       [
         m.nodeId, m.keyFingerprints, m.urls, m.region, m.operatorUserId, m.operatorName, m.operatorKind, m.contact,
         JSON.stringify(m.admission), m.createdAtMs, m.admittedAtMs, m.status, m.probationStartedAtMs, m.cleanDays, m.cleanDayKey,
-        m.cleanDayDirty, m.identityFailingSinceMs, m.suspensionReason, m.updatedAtMs
+        m.cleanDayDirty, m.identityFailingSinceMs, m.suspensionReason, m.updatedAtMs, m.billingEnabled === true
       ]
     );
   }

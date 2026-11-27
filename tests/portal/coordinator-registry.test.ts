@@ -407,3 +407,59 @@ describe("registry routes", () => {
     expect((await bare.inject({ method: "GET", url: "/network/registry" })).statusCode).toBe(503);
   });
 });
+
+describe("ledger-service billing per member (phase 4)", () => {
+  function app(passkeyOk: boolean) {
+    const c = createPeerKeys("community-1");
+    const ctx = setup({ coords: { "https://c.example": { keys: c } } });
+    const passkey: RegistryPasskey = {
+      options: async () => ({ ok: true, challengeId: "challenge-123456", options: {} }),
+      verify: async () => (passkeyOk ? { ok: true } : { ok: false, status: 401, error: "passkey_verification_failed" })
+    };
+    const f = Fastify();
+    registerRegistryRoutes(f, { service: ctx.service, passkey, currentUser: async () => ({ userId: "user-op" }), requireAdmin: async () => ({ userId: "owner" }) });
+    return { f, c, ctx };
+  }
+  const listed = (ctx: ReturnType<typeof setup>) => ctx.service.snapshot().coordinators.find((x) => x.peerId === "community-1");
+
+  it("is off by default, turned on only with the owner's passkey, published in the signed registry", async () => {
+    const { f, c, ctx } = app(true);
+    await ctx.service.apply(application(c, "https://c.example"), "user-op");
+    // Not admitted yet: nothing to bill for.
+    expect(await ctx.service.setBilling("community-1", "owner", true)).toMatchObject({ ok: false, error: "not_admitted" });
+    await ctx.service.approve("community-1", "owner");
+    expect(listed(ctx)?.billingEnabled).toBeUndefined();
+    const bare = await f.inject({ method: "POST", url: "/admin/network/registry/billing", payload: { nodeId: "community-1", enabled: true } });
+    expect(bare.statusCode).toBe(403);
+    expect(bare.json().error).toBe("passkey_required");
+    const on = await f.inject({ method: "POST", url: "/admin/network/registry/billing", payload: { nodeId: "community-1", enabled: true, challengeId: "challenge-123456", response: { id: "cred" } } });
+    expect(on.statusCode).toBe(200);
+    expect(on.json().member.billingEnabled).toBe(true);
+    expect(listed(ctx)).toMatchObject({ status: "probation", billingEnabled: true });
+    const doc = ctx.service.signed()!;
+    const v = verifySignedRegistry(doc, { publicKeys: [ctx.service.publicKey()!.publicKeyPem], now: ctx.now });
+    expect(v.ok && v.registry.coordinators.find((x) => x.peerId === "community-1")?.billingEnabled).toBe(true);
+    const audit = await ctx.service.auditTrail();
+    expect(audit.entries.at(-1)).toMatchObject({ action: "billing_enabled", detail: { confirmedWith: "passkey" } });
+    expect(audit.chain.ok).toBe(true);
+    // Off needs no passkey.
+    const off = await f.inject({ method: "POST", url: "/admin/network/registry/billing", payload: { nodeId: "community-1", enabled: false } });
+    expect(off.json().member.billingEnabled).toBe(false);
+    expect(listed(ctx)?.billingEnabled).toBeUndefined();
+  });
+
+  it("a failed assertion changes nothing; suspension and reinstatement clear the flag", async () => {
+    const { f, c, ctx } = app(false);
+    await ctx.service.apply(application(c, "https://c.example"), "user-op");
+    await ctx.service.approve("community-1", "owner");
+    const bad = await f.inject({ method: "POST", url: "/admin/network/registry/billing", payload: { nodeId: "community-1", enabled: true, challengeId: "challenge-123456", response: {} } });
+    expect(bad.statusCode).toBe(401);
+    expect(listed(ctx)?.billingEnabled).toBeUndefined();
+    await ctx.service.setBilling("community-1", "owner", true);
+    await ctx.service.suspend("community-1", "owner", "test");
+    expect(ctx.service.members().find((m) => m.nodeId === "community-1")!.billingEnabled).toBe(false);
+    await ctx.service.approve("community-1", "owner");
+    expect(ctx.service.members().find((m) => m.nodeId === "community-1")!.billingEnabled).toBe(false);
+    expect(await ctx.service.setBilling("coord-us", "owner", true)).toMatchObject({ ok: false, error: "platform_coordinator" });
+  });
+});
