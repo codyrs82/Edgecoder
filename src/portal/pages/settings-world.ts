@@ -39,7 +39,8 @@ export const WORLD_VIEW_BROWSER_LIB = [
   `var CONTINENTS = ${JSON.stringify(W.CONTINENTS)};`,
   `var STATUS_ORDER = ${JSON.stringify(W.STATUS_ORDER)};`,
   `var CONTINENT_X = ${JSON.stringify(W.CONTINENT_X)};`,
-  `var RING_MIN = ${W.RING_MIN}, RING_MAX = ${W.RING_MAX}, CELL = ${W.CELL}, MS_LO = ${W.MS_LO}, MS_HI = ${W.MS_HI};`,
+  `var RING_MIN = ${W.RING_MIN}, RING_MAX = ${W.RING_MAX}, CELL = ${W.CELL}, MS_LO = ${W.MS_LO}, MS_HI = ${W.MS_HI}, HUB_STAGGER = ${W.HUB_STAGGER};`,
+  `var LINK_LABEL_T = ${JSON.stringify(W.LINK_LABEL_T)};`,
   `var PULSE_MAX_DOTS = ${W.PULSE_MAX_DOTS}, PULSE_MAX_PER_LANE = ${W.PULSE_MAX_PER_LANE}, HEARTBEAT_MS = ${W.HEARTBEAT_MS};`,
   `var PULSE_PERIODS = ${JSON.stringify(W.PULSE_PERIODS)};`,
   `var LABEL_FONT = ${W.LABEL_FONT}, SMALL_FONT = ${W.SMALL_FONT}, RING_FONT = ${W.RING_FONT}, LABEL_CHAR_EM = ${W.LABEL_CHAR_EM}, LABEL_MAX_CHARS = ${W.LABEL_MAX_CHARS}, LABEL_ALL_MAX = ${W.LABEL_ALL_MAX};`,
@@ -72,7 +73,9 @@ export const WORLD_VIEW_BROWSER_LIB = [
     W.boxHitsSegment,
     W.spreadAngles,
     W.placeLabels,
+    W.placeLinkLabels,
     W.hostOf,
+    W.hubBadge,
     W.activityOf,
     W.pulsePeriod,
     W.pulseLevel,
@@ -237,7 +240,7 @@ export const WORLD_RENDER_SCRIPT = `
         var c = hub.coordinator;
         out.push("<g class='wv-hub" + (c.reachable ? "" : " down") + "' transform='translate(" + hub.x + " " + hub.y + ")'>" +
           "<title>" + escapeHtml(hostOf(c.url) + " · " + c.agentsOnline + " machines online" + (c.reachable ? "" : " · not reachable")) + "</title>" +
-          "<circle r='" + HUB_R + "'/><text class='wv-hub-region' y='4' text-anchor='middle'>" + escapeHtml(String(c.region || "?").toUpperCase()) + "</text></g>");
+          "<circle r='" + HUB_R + "'/><text class='wv-hub-region' y='4' text-anchor='middle'>" + escapeHtml(hubBadge(c)) + "</text></g>");
       });
       L.agents.forEach(function (node, i) {
         var a = node.row.agent;
@@ -255,14 +258,12 @@ export const WORLD_RENDER_SCRIPT = `
       // focused or selected.
       out.push("<g class='wv-labels' aria-hidden='true'>");
       L.rings.forEach(function (ring) { out.push("<text class='wv-ring-label' x='" + ring.lx + "' y='" + ring.ly + "'>" + ring.ms + " ms</text>"); });
-      view.links.forEach(function (link) {
-        var a = hubById[link.from], b = hubById[link.to];
-        if (a && b) out.push("<text class='wv-clink-label' x='" + (a.x + b.x) / 2 + "' y='" + ((a.y + b.y) / 2 - 8) + "' text-anchor='middle'>" + escapeHtml(formatMs(link.rttMs)) + "</text>");
+      // Round trips on the coordinator and "You" lines, placed clear of hubs and names (W.placeLinkLabels).
+      L.linkLabels.forEach(function (ll) {
+        if (ll.kind === "mesh") out.push("<text class='wv-clink-label' x='" + ll.x + "' y='" + ll.y + "' text-anchor='" + ll.anchor + "'>" + escapeHtml(ll.text) + "</text>");
+        else if (wvLaneOf(d, ll.key)) out.push("<text class='wv-you-link-label' x='" + ll.x + "' y='" + ll.y + "' text-anchor='" + ll.anchor + "'>" + escapeHtml(ll.text) + "</text>");
       });
       if (L.you) {
-        L.hubs.forEach(function (hub) {
-          if (wvLaneOf(d, "you:" + hub.id) && typeof hub.coordinator.myRttMs === "number") out.push("<text class='wv-you-link-label' x='" + ((L.you.x + hub.x) / 2 + 6) + "' y='" + ((L.you.y + hub.y) / 2 + 40) + "'>" + escapeHtml(formatMs(hub.coordinator.myRttMs)) + "</text>");
-        });
         out.push("<text class='wv-you-label' x='" + L.you.x + "' y='" + (L.you.y + 26) + "' text-anchor='middle'>You</text>");
       }
       L.hubs.forEach(function (hub) { out.push("<text class='wv-hub-host' x='" + hub.x + "' y='" + (hub.y + RING_MAX + 22) + "' text-anchor='middle'>" + escapeHtml(hostOf(hub.coordinator.url)) + "</text>"); });

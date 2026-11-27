@@ -186,7 +186,9 @@ export async function networkWorld(
   // Hosted (transport) callers are not on the user's computer; their timings would be the server's.
   const measure = !d.transport;
   const timed = await Promise.all(
-    coordinators.map((c, i) => (measure && i < MAX_PROBED && typeof c.url === "string" && c.reachable !== false ? cachedProbe(probe, c.url, nowMs) : Promise.resolve(null)))
+    // Every coordinator listed, also one the answering coordinator could not reach this time: this
+    // computer's round trip to it does not depend on that (only its public /identity is timed).
+    coordinators.map((c, i) => (measure && i < MAX_PROBED && typeof c.url === "string" ? cachedProbe(probe, c.url, nowMs) : Promise.resolve(null)))
   );
   // LAN probes only from the user's own computer; a hosted caller drops the LAN facts entirely.
   const rawAgents = Array.isArray(r.json.agents) ? (r.json.agents as Array<Record<string, unknown>>) : [];

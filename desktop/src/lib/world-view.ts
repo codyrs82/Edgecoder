@@ -163,6 +163,11 @@ export function regionText(a: { region: string | null; country: string | null; c
   return parts.length ? parts.join(" · ") : a.continent ? continentName(a.continent) : "Unknown";
 }
 
+/** The code inside a coordinator's hub: its region ("SIN"), else its country ("ZA"), else "?". */
+export function hubBadge(c: { region: string | null; country: string | null }): string {
+  return (c.region || c.country || "?").toUpperCase();
+}
+
 /** What a machine is called: its real name when it is yours, its masked label otherwise. */
 export function displayName(a: WorldAgent, selfAgentId?: string): string {
   if (a.mine && a.name) return a.name === selfAgentId ? `${a.name} (this computer)` : a.name;
@@ -274,6 +279,20 @@ export interface WorldLayout {
   you: { x: number; y: number } | null;
   /** Each machine's name on the map, in `agents` order (placeLabels). */
   labels: MapLabel[];
+  /** The round trip on each coordinator line and each "You" line (placeLinkLabels). */
+  linkLabels: LinkLabel[];
+}
+
+/** A round trip written beside a coordinator line ("mesh") or a line from "You" to a coordinator ("you"). */
+export interface LinkLabel {
+  /** "<from>|<to>" for a coordinator line, "you:<coordinator id>" for a "You" line. */
+  key: string;
+  kind: "mesh" | "you";
+  text: string;
+  x: number;
+  y: number;
+  anchor: "start" | "middle" | "end";
+  box: LabelBox;
 }
 
 /** West to east, so the hubs sit roughly where they are. */
@@ -284,6 +303,11 @@ export const RING_MAX = 138;
 export const CELL = 2 * RING_MAX + 64;
 export const MS_LO = 5;
 export const MS_HI = 400;
+/**
+ * The middle hub of a row of three sits this much lower, so the line between the two outer hubs
+ * does not run through it (it would read as two lines through the middle coordinator).
+ */
+export const HUB_STAGGER = 56;
 
 /** Distance from the hub for a round trip: log scale from MS_LO (RING_MIN) to MS_HI (RING_MAX); unknown at the edge. */
 export function ringRadius(ms: number | null): number {
@@ -310,10 +334,11 @@ export function nodeRadius(a: WorldAgent): number {
 export function worldLayout(view: Pick<WorldView, "coordinators"> & Partial<Pick<WorldView, "links">>, rows: readonly WorldRow[]): WorldLayout {
   const coords = [...view.coordinators].sort((a, b) => (CONTINENT_X[a.continent ?? ""] ?? 9) - (CONTINENT_X[b.continent ?? ""] ?? 9) || a.id.localeCompare(b.id));
   const perRow = Math.max(1, Math.min(3, coords.length));
+  const stagger = perRow === 3 ? HUB_STAGGER : 0;
   const hubs: HubNode[] = coords.map((c, i) => ({
     id: c.id,
     x: CELL / 2 + (i % perRow) * CELL,
-    y: CELL / 2 + Math.floor(i / perRow) * CELL,
+    y: CELL / 2 + Math.floor(i / perRow) * CELL + (i % perRow === 1 ? stagger : 0),
     coordinator: c
   }));
   const hubById = new Map(hubs.map((h) => [h.id, h]));
@@ -322,7 +347,7 @@ export function worldLayout(view: Pick<WorldView, "coordinators"> & Partial<Pick
   const anyMine = view.coordinators.some((c) => typeof c.myRttMs === "number");
   const width = Math.max(CELL, perRow * CELL);
   const lanRows = rows.filter((r) => r.sameNetwork);
-  const you = anyMine || lanRows.length ? { x: width / 2, y: rowsCount * CELL + 26 } : null;
+  const you = anyMine || lanRows.length ? { x: width / 2, y: rowsCount * CELL + stagger + 26 } : null;
   const agents: AgentNode[] = [];
   const byHub = new Map<string, WorldRow[]>();
   for (const r of rows) {
@@ -374,7 +399,8 @@ export function worldLayout(view: Pick<WorldView, "coordinators"> & Partial<Pick
       if (hub) agents.push({ id: row.agent.id, x: hub.x, y: +(hub.y + ringRadius(row.agent.rttMs)).toFixed(1), r: +nodeRadius(row.agent).toFixed(1), hubId: hub.id, row });
     }
   }
-  const layout: WorldLayout = { width, height: rowsCount * CELL + (you ? 64 : 0), hubs, agents, rings, you, labels: [] };
+  const layout: WorldLayout = { width, height: rowsCount * CELL + stagger + (you ? 64 : 0), hubs, agents, rings, you, labels: [], linkLabels: [] };
+  layout.linkLabels = placeLinkLabels(layout, links);
   layout.labels = placeLabels(layout, links);
   return layout;
 }
@@ -545,7 +571,10 @@ export function spreadAngles(n: number, blocked: ReadonlyArray<[number, number]>
  * A name with no free spot is hidden (`visible: false`, at its first spot for hover and focus), so
  * lower-priority names hide first. Above LABEL_ALL_MAX machines only yours are placed.
  */
-export function placeLabels(layout: Pick<WorldLayout, "width" | "height" | "hubs" | "agents" | "rings" | "you">, links: ReadonlyArray<Pick<WorldLink, "from" | "to" | "rttMs">>): MapLabel[] {
+export function placeLabels(
+  layout: Pick<WorldLayout, "width" | "height" | "hubs" | "agents" | "rings" | "you"> & { linkLabels?: LinkLabel[] },
+  links: ReadonlyArray<Pick<WorldLink, "from" | "to" | "rttMs">>
+): MapLabel[] {
   const hubById: Record<string, HubNode> = {};
   layout.hubs.forEach((h) => (hubById[h.id] = h));
   const fixed: LabelBox[] = [];
@@ -560,15 +589,12 @@ export function placeLabels(layout: Pick<WorldLayout, "width" | "height" | "hubs
     const a = hubById[l.from], b = hubById[l.to];
     if (!a || !b) continue;
     segs.push([a.x, a.y, b.x, b.y]);
-    fixed.push(textBox(formatMs(l.rttMs), (a.x + b.x) / 2, (a.y + b.y) / 2 - 8, "middle", SMALL_FONT));
   }
+  for (const ll of layout.linkLabels ?? placeLinkLabels(layout, links)) fixed.push(ll.box);
   const you = layout.you;
   if (you) {
     circles.push([you.x, you.y, 12, ""]);
     fixed.push(textBox("You", you.x, you.y + 26, "middle", SMALL_FONT));
-    for (const h of layout.hubs) {
-      if (typeof h.coordinator.myRttMs === "number") fixed.push(textBox(formatMs(h.coordinator.myRttMs), (you.x + h.x) / 2 + 6, (you.y + h.y) / 2 + 40, "start", SMALL_FONT));
-    }
     for (const n of layout.agents) if (n.lan) fixed.push(textBox(formatMs(n.row.estimateMs), (you.x + n.x) / 2, you.y - 8, "middle", LABEL_FONT));
   }
   for (const n of layout.agents) circles.push([n.x, n.y, n.r + (n.row.agent.mine ? 4 : 0) + 1, n.id]);
@@ -623,6 +649,84 @@ export function placeLabels(layout: Pick<WorldLayout, "width" | "height" | "hubs
     byId[n.id] = { id: n.id, text, full: a.mine && a.name ? a.name : a.label, x: at.x, y: at.y, anchor: at.anchor, box: at.box, visible: !!pick, tier };
   }
   return layout.agents.map((n) => byId[n.id]);
+}
+
+/** Where along a line its round trip may go, most preferred first (share of the way from its first end). */
+export const LINK_LABEL_T = [0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78];
+
+/**
+ * Where each line's round trip goes: the coordinator lines (`links`) first, then the lines from
+ * "You" to each coordinator this computer has a round trip to. Each tries points along its line
+ * (LINK_LABEL_T), on either side, set off far enough that the text does not touch its own line,
+ * and takes the first spot that stays on the map and covers no hub, no coordinator name, no ring
+ * label, no machine, "You", no other line's round trip and no other line; failing that, the
+ * first that covers none of those but a line; failing that, the middle of its line. So a round
+ * trip is never written over a coordinator (run 19: "718 ms" over CDG, whose hub sat on the
+ * line between the two outer coordinators of its row).
+ */
+export function placeLinkLabels(
+  layout: Pick<WorldLayout, "width" | "height" | "hubs" | "rings" | "you"> & { agents?: WorldLayout["agents"] },
+  links: ReadonlyArray<Pick<WorldLink, "from" | "to" | "rttMs">>
+): LinkLabel[] {
+  const hubById: Record<string, HubNode> = {};
+  layout.hubs.forEach((h) => (hubById[h.id] = h));
+  const boxes: LabelBox[] = [];
+  const circles: Array<[number, number, number]> = [];
+  for (const ring of layout.rings) boxes.push(textBox(ring.ms + " ms", ring.lx, ring.ly, "start", RING_FONT));
+  for (const h of layout.hubs) {
+    circles.push([h.x, h.y, HUB_R + 3]);
+    boxes.push(textBox(hostOf(h.coordinator.url), h.x, h.y + RING_MAX + 22, "middle", SMALL_FONT));
+  }
+  for (const n of layout.agents ?? []) if (!n.lan) circles.push([n.x, n.y, n.r + (n.row.agent.mine ? 4 : 0) + 1]);
+  const you = layout.you;
+  if (you) {
+    circles.push([you.x, you.y, 13]);
+    boxes.push(textBox("You", you.x, you.y + 26, "middle", SMALL_FONT));
+  }
+  const lines: Array<{ key: string; kind: "mesh" | "you"; text: string; x1: number; y1: number; x2: number; y2: number }> = [];
+  for (const l of links) {
+    const a = hubById[l.from], b = hubById[l.to];
+    if (a && b && a !== b) lines.push({ key: l.from + "|" + l.to, kind: "mesh", text: formatMs(l.rttMs), x1: a.x, y1: a.y, x2: b.x, y2: b.y });
+  }
+  if (you) {
+    for (const h of layout.hubs) {
+      if (typeof h.coordinator.myRttMs === "number") lines.push({ key: "you:" + h.id, kind: "you", text: formatMs(h.coordinator.myRttMs), x1: you.x, y1: you.y, x2: h.x, y2: h.y });
+    }
+  }
+  const out: LinkLabel[] = [];
+  for (const line of lines) {
+    const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    // The normal pointing up (right, for a vertical line); candidates try that side, then the other.
+    let nx = -dy / len, ny = dx / len;
+    if (ny > 0 || (ny === 0 && nx < 0)) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const w = Math.max(1, line.text.length) * SMALL_FONT * LABEL_CHAR_EM + 2;
+    const h = SMALL_FONT * 1.1;
+    // How far the text's centre must be from the line for its box to clear it.
+    const off = (Math.abs(nx) * w) / 2 + (Math.abs(ny) * h) / 2 + 3;
+    const cands: Array<{ x: number; y: number; box: LabelBox }> = [];
+    for (const t of LINK_LABEL_T) {
+      for (const side of [1, -1]) {
+        const cx = line.x1 + dx * t + nx * off * side;
+        const cy = line.y1 + dy * t + ny * off * side;
+        const x = +cx.toFixed(1);
+        const y = +(cy - h / 2 + SMALL_FONT * 0.82).toFixed(1);
+        cands.push({ x, y, box: textBox(line.text, x, y, "middle", SMALL_FONT) });
+      }
+    }
+    const clear = (b: LabelBox) =>
+      b.x >= 0 && b.y >= 0 && b.x + b.w <= layout.width && b.y + b.h <= layout.height &&
+      !boxes.some((o) => boxesOverlap(b, o, 1)) &&
+      !circles.some((c) => boxHitsCircle(b, c[0], c[1], c[2]));
+    const crossesNoLine = (b: LabelBox) => !lines.some((o) => o !== line && boxHitsSegment(b, o.x1, o.y1, o.x2, o.y2, 1));
+    const pick = cands.find((c) => clear(c.box) && crossesNoLine(c.box)) || cands.find((c) => clear(c.box)) || cands[0];
+    boxes.push(pick.box);
+    out.push({ key: line.key, kind: line.kind, text: line.text, x: pick.x, y: pick.y, anchor: "middle", box: pick.box });
+  }
+  return out;
 }
 
 /** Short host for a coordinator URL. */

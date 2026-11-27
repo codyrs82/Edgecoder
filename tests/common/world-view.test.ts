@@ -279,3 +279,81 @@ describe("map labels: short names, placed without collisions", () => {
     }
   });
 });
+
+describe("four coordinators: two outside ones (Fly sin, Azure jnb) peered by signature", () => {
+  const { ORD, CDG } = FIXTURES;
+  const SIN = "coord-sin-fly";
+  const JNB = "coord-jnb-azure";
+  function fourWorld(regions: boolean): W.WorldView {
+    const coords: W.WorldCoordinator[] = [
+      ...WORLD.coordinators,
+      { id: SIN, url: "https://edgecoder-coord-sin.fly.dev", region: regions ? "sin" : null, country: regions ? "SG" : null, continent: regions ? "AS" : null, agents: 1, agentsOnline: 1, reachable: true, self: false, myRttMs: 241 },
+      { id: JNB, url: "https://edgecoder-coord3-jnb.southafricanorth.cloudapp.azure.com", region: regions ? "jnb" : null, country: regions ? "ZA" : null, continent: regions ? "AF" : null, agents: 1, agentsOnline: 1, reachable: true, self: false, myRttMs: 718 }
+    ];
+    const ids = [ORD, CDG, SIN, JNB];
+    const links: W.WorldLink[] = [];
+    ids.forEach((a, i) => ids.slice(i + 1).forEach((b, j) => links.push({ from: a, to: b, rttMs: 100 + 37 * (i + j) })));
+    const extra = [
+      { ...WORLD.agents[0], id: "s000000sin1", label: "lin-•••sin1", coordinatorId: SIN, region: "sin", country: "SG", continent: "AS", rttMs: 2 },
+      { ...WORLD.agents[0], id: "j000000jnb1", label: "lin-•••9a7c", coordinatorId: JNB, region: "jnb", country: "ZA", continent: "AF", rttMs: 2 }
+    ];
+    return { ...WORLD, coordinators: coords, links, agents: [...WORLD.agents, ...extra] };
+  }
+
+  for (const regions of [true, false]) {
+    it(`no round trip is written over a hub, a coordinator's name, a ring label, a machine or another round trip (${regions ? "regions known" : "regions unknown, as in the screenshot"})`, () => {
+      const view = fourWorld(regions);
+      const layout = W.worldLayout(view, W.rowsFor(view));
+      // Six coordinator lines plus four "You" lines, each labelled once.
+      expect(layout.linkLabels.filter((l) => l.kind === "mesh")).toHaveLength(6);
+      expect(layout.linkLabels.filter((l) => l.kind === "you")).toHaveLength(4);
+      expect(layout.linkLabels.some((l) => l.text === "718 ms")).toBe(true);
+      const hubText = layout.hubs.map((h) => W.textBox(W.hostOf(h.coordinator.url), h.x, h.y + W.RING_MAX + 22, "middle", W.SMALL_FONT));
+      const ringText = layout.rings.map((r) => W.textBox(r.ms + " ms", r.lx, r.ly, "start", W.RING_FONT));
+      const shown = layout.labels.filter((l) => l.visible);
+      layout.linkLabels.forEach((ll, i) => {
+        for (const h of layout.hubs) expect(W.boxHitsCircle(ll.box, h.x, h.y, W.HUB_R + 2), `${ll.key} ${ll.text} on hub ${h.id}`).toBe(false);
+        for (const b of hubText) expect(W.boxesOverlap(ll.box, b), `${ll.text} on a coordinator name`).toBe(false);
+        for (const b of ringText) expect(W.boxesOverlap(ll.box, b), `${ll.text} on a ring label`).toBe(false);
+        for (const n of layout.agents) expect(W.boxHitsCircle(ll.box, n.x, n.y, n.r), `${ll.text} on a machine`).toBe(false);
+        for (const m of shown) expect(W.boxesOverlap(ll.box, m.box), `${ll.text} on ${m.text}`).toBe(false);
+        layout.linkLabels.forEach((other, j) => {
+          if (j !== i) expect(W.boxesOverlap(ll.box, other.box), `${ll.text} on ${other.text}`).toBe(false);
+        });
+        expect(ll.box.x).toBeGreaterThanOrEqual(0);
+        expect(ll.box.x + ll.box.w).toBeLessThanOrEqual(layout.width);
+        expect(ll.box.y + ll.box.h).toBeLessThanOrEqual(layout.height);
+      });
+    });
+  }
+
+  it("no coordinator line runs through a third coordinator's hub (the middle of a row of three sits lower)", () => {
+    const view = fourWorld(true);
+    const layout = W.worldLayout(view, W.rowsFor(view));
+    const at = Object.fromEntries(layout.hubs.map((h) => [h.id, h]));
+    for (const l of view.links) {
+      const a = at[l.from], b = at[l.to];
+      for (const h of layout.hubs) {
+        if (h === a || h === b) continue;
+        const box = { x: h.x - W.HUB_R, y: h.y - W.HUB_R, w: 2 * W.HUB_R, h: 2 * W.HUB_R };
+        expect(W.boxHitsSegment(box, a.x, a.y, b.x, b.y, 0), `${l.from} → ${l.to} through ${h.id}`).toBe(false);
+      }
+    }
+    expect(layout.hubs[1].y - layout.hubs[0].y).toBe(W.HUB_STAGGER);
+    // Your machine is still marked and named on the map.
+    expect(layout.labels.find((l) => l.full === FIXTURES.MY_MACHINE)?.visible).toBe(true);
+  });
+
+  it("the hub reads the region code, else the country, else ?", () => {
+    expect(W.hubBadge({ region: "sin", country: "SG" })).toBe("SIN");
+    expect(W.hubBadge({ region: null, country: "ZA" })).toBe("ZA");
+    expect(W.hubBadge({ region: null, country: null })).toBe("?");
+  });
+
+  it("the browser copy lays the four out the same", () => {
+    const view = fourWorld(true);
+    const lib = new Function(`${WORLD_VIEW_BROWSER_LIB}; return { rowsFor, worldLayout, hubBadge };`)() as typeof W;
+    expect(JSON.parse(JSON.stringify(lib.worldLayout(view, lib.rowsFor(view))))).toEqual(JSON.parse(JSON.stringify(W.worldLayout(view, W.rowsFor(view)))));
+    expect(lib.hubBadge({ region: "jnb", country: "ZA" })).toBe("JNB");
+  });
+});

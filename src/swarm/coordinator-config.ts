@@ -142,6 +142,10 @@ export const coordinatorConfigSchema = z.object({
   MESH_WS_REQUIRE_SIGNED: envFlag({ on: ["true"], ci: true }),
   /** WebSocket ping interval on each mesh socket, for the round trip in GET /network/world; 0 turns pings off. */
   MESH_WS_PING_INTERVAL_MS: envInt(20_000, { min: 0 }),
+  /** How often each peer coordinator's GET /identity is timed (link round trip, region); 0 off. */
+  WORLD_PEER_PROBE_MS: envInt(30_000, { min: 0 }),
+  /** false: no geolocation lookup of this coordinator's public address when no region is configured. */
+  COORDINATOR_REGION_LOOKUP: envFlag({ off: ["false", "0"], ci: true }),
   /** On SIGTERM / SIGINT, how long running work may finish before the coordinator exits (coordinator/drain.ts). */
   COORDINATOR_DRAIN_MS: envInt(25_000, { min: 0 }),
   /** Outside production only; production always requires signed agent requests. */

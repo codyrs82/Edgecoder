@@ -26,6 +26,7 @@
     filterRows,
     formatMs,
     hostOf,
+    hubBadge,
     nearestText,
     nearestToYou,
     nearness,
@@ -412,7 +413,7 @@
                 <g class="hub" class:hub-down={!hub.coordinator.reachable} transform="translate({hub.x} {hub.y})">
                   <title>{hostOf(hub.coordinator.url)} · {hub.coordinator.agentsOnline} machines online{hub.coordinator.reachable ? "" : " · not reachable"}</title>
                   <circle r={HUB_R} />
-                  <text class="hub-region" y="4" text-anchor="middle">{(hub.coordinator.region ?? "?").toUpperCase()}</text>
+                  <text class="hub-region" y="4" text-anchor="middle">{hubBadge(hub.coordinator)}</text>
                 </g>
               {/each}
               {#each layout.agents as node, i (node.id)}
@@ -453,19 +454,17 @@
                 {#each layout.rings as ring (ring.hubId + ring.ms)}
                   <text class="ring-label" x={ring.lx} y={ring.ly}>{ring.ms} ms</text>
                 {/each}
-                {#each view.links as link (link.from + link.to)}
-                  {@const a = hubById.get(link.from)}
-                  {@const b = hubById.get(link.to)}
-                  {#if a && b}<text class="clink-label" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 8} text-anchor="middle">{formatMs(link.rttMs)}</text>{/if}
+                <!-- Round trips on the coordinator lines and the "You" lines, placed clear of hubs and names (placeLinkLabels). -->
+                {#each layout.linkLabels as ll (ll.key)}
+                  {#if ll.kind === "mesh"}
+                    <text class="clink-label" x={ll.x} y={ll.y} text-anchor={ll.anchor}>{ll.text}</text>
+                  {:else if laneById.get(ll.key)}
+                    <text class="you-link-label" x={ll.x} y={ll.y} text-anchor={ll.anchor}>{ll.text}</text>
+                  {/if}
                 {/each}
                 {#if layout.you}
                   {#each layout.agents.filter((n) => n.lan) as node (node.id)}
                     <text class="lan-link-label" x={(layout.you.x + node.x) / 2} y={layout.you.y - 8} text-anchor="middle">{formatMs(node.row.estimateMs)}</text>
-                  {/each}
-                  {#each layout.hubs as hub (hub.id)}
-                    {#if laneById.get(`you:${hub.id}`) && typeof hub.coordinator.myRttMs === "number"}
-                      <text class="you-link-label" x={(layout.you.x + hub.x) / 2 + 6} y={(layout.you.y + hub.y) / 2 + 40}>{formatMs(hub.coordinator.myRttMs)}</text>
-                    {/if}
                   {/each}
                   <text class="you-label" x={layout.you.x} y={layout.you.y + 26} text-anchor="middle">You</text>
                 {/if}
