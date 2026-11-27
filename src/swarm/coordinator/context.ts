@@ -280,18 +280,42 @@ export function peerMayTakeBilledWork(peerId: string): boolean {
  * coordinators (edgecoder-coord-sin.fly.dev, edgecoder-coord3-jnb on Azure) that cannot bill them
  * (402); the portal, rightly, did not follow (75 times). A peer bills when the signed registry lists
  * it as a platform coordinator, or as an active community member with billingEnabled while this
- * coordinator runs the ledger service (#649); a peer the registry does not list, when it is in the
- * allowlist (peerMayTakeBilledWork: the platform's own seeds; every peer in development).
+ * coordinator runs the ledger service (#649); a peer the registry does not list only when it is
+ * allowlisted and its URL is in MESH_TOKEN_PEER_URLS (peerBillable).
  * Outside coordinators stay peers for gossip, the world view and own-machine calls.
  */
 export function peerMayBillCalls(peerId: string): boolean {
-  const listing = registryTrust.enabled ? registryTrust.listing(peerId) : null;
-  if (listing === "platform") return true;
-  if (listing !== null) {
-    const m = registryTrust.member(peerId);
-    return !!m && memberBillable(m) && ledgerServiceOn;
-  }
-  return peerMayTakeBilledWork(peerId);
+  // A registry held (verified, unexpired), not merely keys to verify one with (those are built in).
+  const registryHeld = registryTrust.enabled && registryTrust.current() !== null;
+  const listing = registryHeld ? registryTrust.listing(peerId) : null;
+  const member = listing !== null && listing !== "platform" ? registryTrust.member(peerId) : null;
+  return peerBillable({
+    listing,
+    billableMember: !!member && memberBillable(member),
+    ledgerOn: ledgerServiceOn,
+    allowlisted: MESH_PEER_ALLOWLIST.has(peerId),
+    allowlistEmpty: MESH_PEER_ALLOWLIST.size === 0,
+    registryHeld,
+    tokenScope: MESH_TOKEN_SCOPE,
+    peerUrl: peerUrlPins().get(peerId),
+  });
+}
+
+/**
+ * The rule behind peerMayBillCalls, on its inputs (tests). A registry listing decides: platform
+ * yes; a community member only when billable while the ledger service runs here. A peer the
+ * registry does not list is billable only when it is definitely a platform coordinator: in the
+ * allowlist and its URL one this coordinator sends the mesh token to (MESH_TOKEN_PEER_URLS: the
+ * platform's own seeds). In production the allowlist also holds outside coordinators (that is how
+ * they peer): they get no billed calls. Development (no registry, no MESH_TOKEN_PEER_URLS): every
+ * allowlisted peer, or every peer with no allowlist, as before.
+ */
+export function peerBillable(c: { listing: string | null; billableMember: boolean; ledgerOn: boolean; allowlisted: boolean; allowlistEmpty: boolean; registryHeld: boolean; tokenScope: MeshTokenScope; peerUrl: string | undefined }): boolean {
+  if (c.listing === "platform") return true;
+  if (c.listing !== null) return c.billableMember && c.ledgerOn;
+  if (!c.allowlisted && !c.allowlistEmpty) return false;
+  if (!c.registryHeld && c.tokenScope === null) return true;
+  return c.tokenScope !== null && c.peerUrl !== undefined && meshTokenAllowedFor(c.tokenScope, c.peerUrl);
 }
 let ledgerServiceOn = false;
 /** Set by ledger-service.ts: this coordinator runs EdgeCoder's ledger service (it bills community members' calls). */
