@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countdown, fmtMsat, fmtUsd, networkInfo, purchasePreview, reasonText } from "../src/lib/wallet-format";
+import { activityText, countdown, fmtMsat, fmtUsd, networkInfo, purchasePreview, reasonText, routingFeeNote } from "../src/lib/wallet-format";
 
 describe("wallet formatting", () => {
   it("previews the purchase fee the way the coordinator computes it (free by default; 1.5 % if set)", () => {
@@ -20,6 +20,14 @@ describe("wallet formatting", () => {
   it("names ledger rows in plain words", () => {
     expect(reasonText("credit_purchase:pi-1")).toBe("Bought cSats");
     expect(reasonText("something_new:x")).toBe("something new");
+  });
+  it("names a routing-fee row with the coordinator that routed the call, and notes routing fees in the earnings", () => {
+    expect(activityText({ reason: "routing_fee:t1", coordinator: "coord.example.org" })).toBe("Routing fee (coordinator coord.example.org)");
+    expect(activityText({ reason: "routing_fee:t1" })).toBe("Routing fee");
+    expect(activityText({ reason: "compute_contribution" })).toBe("Earned running jobs");
+    expect(routingFeeNote(2.4)).toBe("incl. 2.4 sats routing fees");
+    expect(routingFeeNote(0)).toBe("");
+    expect(routingFeeNote(undefined)).toBe("");
   });
   it("shows earnings below 1 sat (msat with 3 decimals)", () => {
     expect(fmtMsat(420)).toBe("0.42");

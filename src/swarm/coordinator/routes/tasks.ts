@@ -14,7 +14,8 @@ import { signPayload } from "../../../mesh/peer.js";
 import { verifyForwardedResult } from "../../../mesh/peer-trust.js";
 import { buildAgentEnvelope, verifyForwardedAgentEnvelope } from "../../../mesh/forwarded-agent-envelope.js";
 import { DuplicateDebitError, remoteLedger, reserveTaskCredits, rewardAccountForAgent, spendCredits, taskReserveKey, topUpTaskReserve } from "../../../credits/store.js";
-import { buyerProofFrom } from "../../../ledger-service/protocol.js";
+import { buyerProofFrom, PEER_WORK_HOST_PAID_BY_ORIGIN } from "../../../ledger-service/protocol.js";
+import type { SignedAgentReceiptClaim } from "../../../receipts/receipt.js";
 import { msatToCSats } from "../../../economy/job-pricing.js";
 import { pgStore } from "../../../db/store.js";
 import { resolveRequestedClass, type ComputeClassId } from "../../../economy/compute-classes.js";
@@ -116,7 +117,7 @@ import {
   holdSettlement,
   publishResult,
   releaseDependents,
-  chargePeerWork,
+  chargeAndPayPeerWork,
   taskOpenCount,
   offerSubtaskToPeers,
   isPeerOffered,
@@ -856,6 +857,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // Until this result's cost is on the task's billing (the stream read answers with it).
     const releasePricing = holdPricing(body.taskId);
     let chargedMsat = 0;
+    let hostPaidByOrigin = false;
     let recorded = false;
     try {
       // For a subtask a peer offered us: its cost here goes to the origin with the result, and what the
@@ -864,7 +866,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         ? { subtaskId: body.subtaskId, agentId: body.agentId, ok: body.ok, output: body.output ?? "", meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, payableFailure } }
         : undefined;
       const peerCostMsat = execution && isPeerOffered(body.subtaskId) ? peerWorkCostMsat(execution) : undefined;
-      const originChargedMsat = await publishResult(body, agentEnvelope, peerCostMsat);
+      const originCharge = await publishResult(body, agentEnvelope, peerCostMsat);
       recorded = true;
       // Pieces lost on the way would leave the requester with less than the result it pays for.
       if (body.ok && subtask?.kind === "inference" && inferenceStreams.backfill(body.subtaskId, body.output ?? "")) {
@@ -886,12 +888,32 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         const worstCase = taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0;
         const reported = (rawBody as { peerCostMsat?: unknown }).peerCostMsat;
         const peerCost = typeof reported === "number" && Number.isFinite(reported) && reported >= 0 ? reported : worstCase;
-        chargedMsat = body.ok ? await chargePeerWork(body.taskId, Math.min(peerCost, worstCase), body.agentId) : 0;
+        // When either side bills through the ledger service, the host is paid here on the shared
+        // ledger (results.ts chargeAndPayPeerWork) and the answer tells the peer not to pay it.
+        if (body.ok) {
+          const fwdBody = rawBody as { hostAccountId?: unknown; executorBilling?: unknown };
+          const sub = grantedForward.subtask;
+          const timeoutMs = Number.isFinite(sub.timeoutMs) && sub.timeoutMs > 0 ? Math.min(sub.timeoutMs, 86_400_000) : 86_400_000;
+          const paid = await chargeAndPayPeerWork({
+            taskId: body.taskId,
+            subtaskId: body.subtaskId,
+            agentId: body.agentId,
+            wantMsat: Math.min(peerCost, worstCase),
+            executorPeerId: grantedForward.peerId,
+            hostAccountId: typeof fwdBody.hostAccountId === "string" && fwdBody.hostAccountId.length <= 256 ? fwdBody.hostAccountId : undefined,
+            executorBilling: typeof fwdBody.executorBilling === "string" ? fwdBody.executorBilling : undefined,
+            receipt: body.receipt as SignedAgentReceiptClaim | undefined,
+            resourceClass: sub.projectMeta.resourceClass,
+            durationMs: Math.max(0, Math.min(Number(body.durationMs) || 0, timeoutMs))
+          });
+          chargedMsat = paid.chargedMsat;
+          hostPaidByOrigin = paid.hostPaidByOrigin;
+        }
         remoteGrants.settle(body.subtaskId, chargedMsat, Date.now());
         if (taskOpenCount(body.taskId) === 0) orderBook.removeBid(body.taskId);
       }
 
-      if (execution) await accrueResultCredits(execution, { originChargedMsat, onPriced: releasePricing });
+      if (execution) await accrueResultCredits(execution, { originCharge, onPriced: releasePricing });
     } finally {
       // Nothing recorded: the granted peer may send the result again.
       if (grantedForward && !recorded) remoteGrants.release(body.subtaskId);
@@ -899,6 +921,6 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       releaseSettlement();
     }
     await settleTaskIfDone(body.taskId);
-    return reply.send({ ok: true, ...(grantedForward ? { chargedMsat } : {}) });
+    return reply.send({ ok: true, ...(grantedForward ? { chargedMsat, ...(hostPaidByOrigin ? { hostPaidBy: PEER_WORK_HOST_PAID_BY_ORIGIN } : {}) } : {}) });
   });
 }

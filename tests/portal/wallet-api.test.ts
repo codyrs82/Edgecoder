@@ -9,7 +9,7 @@ async function fakeCoordinator(opts: { payouts?: boolean } = {}) {
   const seen: Array<{ method: string; path: string; body: any; token: unknown }> = [];
   const co = Fastify();
   const note = (req: any) => seen.push({ method: req.method, path: req.url, body: req.body, token: req.headers["x-portal-service-token"] });
-  co.post("/account/summary", async (req) => (note(req), { accountId: (req.body as any).accountId, cSats: 19700, earnedSats: 1234, recent: [{ type: "earn", cSats: 19700, reason: "credit_purchase:pi-1", atMs: 1 }] }));
+  co.post("/account/summary", async (req) => (note(req), { accountId: (req.body as any).accountId, cSats: 19700, earnedSats: 1234, routingFeeSats: 2.4, recent: [{ type: "earn", cSats: 19700, reason: "credit_purchase:pi-1", atMs: 1 }, { type: "earn", cSats: 2.4, reason: "routing_fee:t1", taskId: "t1", atMs: 2, coordinator: "coord.example.org" }] }));
   co.get("/inference/models", async (req) => (note(req), { models: [{ model: "qwen3.5:9b", agents: 2, classes: ["gpu"], cSatsPerMTokens: { input: 40, output: 100 } }], classes: { gpu: { label: "GPU", cSatsPerSecondBaseTier: 0.05 } } }));
   co.get("/economy/rates/current", async (req) => (note(req), { epoch: { btcUsd: 100000, createdAtMs: 5 }, stale: false }));
   co.get("/economy/market/book", async (req) => (note(req), { books: [], networkFeeBps: 500, purchaseFeeBps: 150 }));
@@ -78,6 +78,9 @@ describe("portal wallet API", () => {
       accountId: "acct-u1",
       cSats: 19700,
       earnedSats: 1234,
+      // Routing fees: part of the earnings, each row naming the coordinator that routed the call.
+      routingFeeSats: 2.4,
+      recent: [expect.anything(), { type: "earn", cSats: 2.4, reason: "routing_fee:t1", taskId: "t1", atMs: 2, coordinator: "coord.example.org" }],
       btcUsd: 100000,
       fees: { purchaseFeeBps: 150, networkFeeBps: 500 },
       topup: { minSats: 100, maxSats: 1_000_000 },
@@ -163,6 +166,24 @@ describe("wallet top-up rate limit", () => {
     expect(rateLimitFor("/portal/api/wallet/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
     expect(rateLimitFor("/v1/account/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
     expect(rateLimitFor("/portal/api/wallet/topup/abc", "GET")).toBeUndefined();
+  });
+});
+
+describe("wallet page: routing-fee earnings", () => {
+  it("labels a routing-fee row with its coordinator and notes routing fees in the earnings", async () => {
+    const { WALLET_SCRIPT, WALLET_CONTENT } = await import("../../src/portal/pages/wallet.js");
+    const start = WALLET_SCRIPT.indexOf("const REASONS = {");
+    const end = WALLET_SCRIPT.indexOf("\n", WALLET_SCRIPT.indexOf("function routingNote("));
+    expect(start).toBeGreaterThan(0);
+    const fns = new Function(`const fmtNum = (n, d) => String(n); ${WALLET_SCRIPT.slice(start, end)}; return { activityText, routingNote };`)();
+    expect(fns.activityText({ reason: "routing_fee:t1", coordinator: "coord.example.org" })).toBe("Routing fee (coordinator coord.example.org)");
+    expect(fns.activityText({ reason: "routing_fee:t1" })).toBe("Routing fee");
+    expect(fns.activityText({ reason: "compute_contribution" })).toBe("Earned running jobs");
+    expect(fns.routingNote(2.4)).toBe("incl. 2.4 sats routing fees");
+    expect(fns.routingNote(0)).toBe("");
+    expect(WALLET_SCRIPT).toContain("escapeHtml(activityText(t))");
+    expect(WALLET_CONTENT).toContain('id="balanceEarnedNote"');
+    expect(WALLET_CONTENT).toContain('id="payoutEarnedNote"');
   });
 });
 

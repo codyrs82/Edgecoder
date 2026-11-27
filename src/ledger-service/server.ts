@@ -54,6 +54,7 @@ export type LedgerServiceStore = Pick<
   | "ledgerServiceSettle"
   | "ledgerServiceRefund"
   | "creditBalance"
+  | "persistContributionWithOverflow"
   | "getAgentOwnership"
   | "listAgentSigningKeys"
 >;
@@ -107,6 +108,56 @@ const refuse = (code: number, error: string, extra: Record<string, unknown> = {}
 /** sha256 of the agent's signed claim (canonical form plus signature): the receipt id a settle names. */
 export function agentClaimId(claim: SignedAgentReceiptClaim): string {
   return createHash("sha256").update(`${canonicalAgentClaim(claim)}\n${claim.agentSignature}`).digest("hex");
+}
+
+/** One earn row of a settle, under a tx id derived from the report, account and reason (a retry writes the same id). */
+export function settleEarnRow(reportId: string, taskId: string, accountId: string, msat: number, reason: string, nowMs: number): CreditTransaction {
+  return {
+    txId: `${reason === "compute_contribution" ? "ls-earn" : reason.split(":")[0]}:${createHash("sha256").update(`${reportId}\n${accountId}\n${reason}`).digest("hex").slice(0, 32)}`,
+    accountId,
+    type: "earn",
+    credits: roundCredits(msat / 1000),
+    reason,
+    relatedTaskId: taskId,
+    timestampMs: nowMs,
+    msat: Math.round(msat)
+  };
+}
+
+/** The agent's claim names exactly this execution and its signature holds. */
+export function claimMatches(claim: SignedAgentReceiptClaim, s: { taskId: string; subtaskId: string; agentId: string }): boolean {
+  return claim.taskId === s.taskId && claim.subtaskId === s.subtaskId && claim.agentId === s.agentId && claim.finishedAtMs >= claim.startedAtMs && verifyAgentClaim(claim);
+}
+
+/**
+ * The claim against what the shared database knows about the agent: its signing keys (when it knows
+ * any) and its owner. `hostAccountId` is the owner it knows, else the one the caller named.
+ */
+export async function checkAgentAgainstStore(
+  store: Pick<LedgerServiceStore, "listAgentSigningKeys" | "getAgentOwnership">,
+  claim: SignedAgentReceiptClaim,
+  agentId: string,
+  namedHostAccountId: string
+): Promise<{ problem: null | "key_mismatch" | "host_mismatch"; hostAccountId: string }> {
+  const knownKeys = await store.listAgentSigningKeys(agentId);
+  if (knownKeys.length > 0 && !knownKeys.some((k) => normalizePem(k) === normalizePem(claim.agentPublicKeyPem))) return { problem: "key_mismatch", hostAccountId: namedHostAccountId };
+  const owner = await store.getAgentOwnership(agentId);
+  if (owner && owner.accountId !== namedHostAccountId) return { problem: "host_mismatch", hostAccountId: owner.accountId };
+  return { problem: null, hostAccountId: owner?.accountId ?? namedHostAccountId };
+}
+
+export interface SeedPeerWorkInput {
+  taskId: string;
+  subtaskId: string;
+  agentId: string;
+  /** The host account the executing coordinator named; the owner the shared database knows wins. */
+  hostAccountId: string;
+  /** What the origin charged its requester for the subtask (taken from the task's reserve). */
+  chargedMsat: number;
+  resourceClass: "cpu" | "gpu";
+  durationMs: number;
+  receipt: SignedAgentReceiptClaim | undefined;
+  executorPeerId: string;
 }
 
 export class LedgerService {
@@ -252,29 +303,37 @@ export class LedgerService {
     const parsed = settleRequestSchema.safeParse(body ?? {});
     if (!parsed.success) return refuse(400, "invalid_request");
     const s = parsed.data;
+    const peer = s.peerWork;
     // Every settle names the agent's signed claim for exactly this execution.
     const claim = s.receipt as SignedAgentReceiptClaim | undefined;
     if (!claim) {
       await this.anomaly(peerId, "settle_without_receipt", { taskId: s.taskId, subtaskId: s.subtaskId });
       return refuse(403, "receipt_required");
     }
-    if (claim.taskId !== s.taskId || claim.subtaskId !== s.subtaskId || claim.agentId !== s.agentId || claim.finishedAtMs < claim.startedAtMs || !verifyAgentClaim(claim)) {
+    // The caller checks the claim's signature and ids itself (peer work too, before relaying it).
+    if (!claimMatches(claim, s)) {
       await this.anomaly(peerId, "settle_receipt_invalid", { taskId: s.taskId, subtaskId: s.subtaskId });
       return refuse(403, "receipt_invalid");
     }
     // What the shared database knows about the agent must agree: its keys, and whose machine it is.
-    const knownKeys = await this.d.store.listAgentSigningKeys(s.agentId);
-    if (knownKeys.length > 0 && !knownKeys.some((k) => normalizePem(k) === normalizePem(claim.agentPublicKeyPem))) {
+    // Peer work: the caller relays another coordinator's claim and cannot check these, so a
+    // mismatch is a refusal (a dispute), and the host is the owner the database knows.
+    const known = await checkAgentAgainstStore(this.d.store, claim, s.agentId, s.hostAccountId);
+    if (known.problem === "key_mismatch") {
+      if (peer) {
+        await this.dispute(peerId, "peer_work_agent_key_mismatch", { taskId: s.taskId, agentId: s.agentId, executorPeerId: peer.executorPeerId });
+        return refuse(403, "receipt_invalid");
+      }
       await this.anomaly(peerId, "settle_agent_key_mismatch", { taskId: s.taskId, agentId: s.agentId });
       return refuse(403, "receipt_invalid");
     }
-    const owner = await this.d.store.getAgentOwnership(s.agentId);
-    if (owner && owner.accountId !== s.hostAccountId) {
+    if (known.problem === "host_mismatch" && !peer) {
       await this.anomaly(peerId, "settle_host_mismatch", { taskId: s.taskId, agentId: s.agentId });
       return refuse(403, "host_account_mismatch");
     }
+    const hostAccountId = peer ? known.hostAccountId : s.hostAccountId;
     const task = await this.d.store.ledgerServiceTask(s.taskId);
-    if (task && task.accountId === s.hostAccountId) {
+    if (task && task.accountId === hostAccountId) {
       // The buyer's own machine: not a sale (results.ts sameAccountGroup), nothing to charge.
       return refuse(409, "own_account_not_billed");
     }
@@ -291,17 +350,8 @@ export class LedgerService {
       const { routingMsat, poolMsat } = splitRoutingFee(feeMsat, this.d.config.routingShareBps);
       const credits = roundCredits(agentMsat / 1000);
       builtRef.v = { costMsat, agentMsat, feeMsat, routingMsat, poolMsat, credits };
-      const row = (accountId: string, msat: number, reason: string): CreditTransaction => ({
-        txId: `${reason === "compute_contribution" ? "ls-earn" : reason.split(":")[0]}:${createHash("sha256").update(`${reportId}\n${accountId}\n${reason}`).digest("hex").slice(0, 32)}`,
-        accountId,
-        type: "earn",
-        credits: roundCredits(msat / 1000),
-        reason,
-        relatedTaskId: s.taskId,
-        timestampMs: nowMs,
-        msat: Math.round(msat)
-      });
-      const tx = row(s.hostAccountId, agentMsat, "compute_contribution");
+      const row = (accountId: string, msat: number, reason: string) => settleEarnRow(reportId, s.taskId, accountId, msat, reason, nowMs);
+      const tx = row(hostAccountId, agentMsat, "compute_contribution");
       const feeTx = poolMsat > 0 ? row(NETWORK_FEE_POOL_ACCOUNT, poolMsat, `network_fee:${s.taskId}`) : undefined;
       const extraTxs = routingMsat > 0 ? [row(routingAccount, routingMsat, `${ROUTING_FEE_REASON_PREFIX}${s.taskId}`)] : [];
       return { tx, ...(feeTx ? { feeTx } : {}), extraTxs };
@@ -312,7 +362,7 @@ export class LedgerService {
       taskId: s.taskId,
       report: {
         reportId,
-        agentId: s.hostAccountId,
+        agentId: hostAccountId,
         sourceAgentId: s.agentId,
         taskId: s.taskId,
         resourceClass: s.resourceClass,
@@ -344,11 +394,11 @@ export class LedgerService {
       .recordAccrual({
         taskId: s.taskId,
         subtaskId: s.subtaskId,
-        hostAccountId: s.hostAccountId,
+        hostAccountId: hostAccountId,
         routedBy: peerId,
         payload: {
           sourceAgentId: s.agentId,
-          accountId: s.hostAccountId,
+          accountId: hostAccountId,
           credits: b.credits,
           msat: b.agentMsat,
           costMsat: b.costMsat,
@@ -356,6 +406,7 @@ export class LedgerService {
           routingFeeMsat: b.routingMsat,
           routingAccountId: routingAccount,
           routedBy: peerId,
+          ...(peer ? { executedBy: peer.executorPeerId, peerWork: true } : {}),
           receiptId,
           ...(out.coveredMsat > 0 ? { overflowMsat: out.coveredMsat } : {}),
           pricingBasis: "ledger_service",
@@ -378,6 +429,84 @@ export class LedgerService {
       receiptId
     };
     return ok(res as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * A seed's own task (billed on this database, not through the API) whose subtask a coordinator
+   * that bills through this service ran: that coordinator has no ledger to pay its host from, so the
+   * seed pays the host here, out of what it charged its requester for the subtask. Same rows and
+   * rules as a settle: the agent's claim is required and must match what the database knows, one
+   * report per subtask (`result:<subtaskId>`, so whoever records it first pays and nobody pays twice),
+   * the host earning and the fee in one transaction, and the earnings_accrual record. The seed took
+   * the buyer, so the whole fee stays in EdgeCoder's pool: no routing share.
+   */
+  async settleSeedPeerWork(input: SeedPeerWorkInput): Promise<{ status: "settled"; agentMsat: number; feeMsat: number; receiptId: string } | { status: "duplicate" } | { status: "refused"; error: string }> {
+    const claim = input.receipt;
+    if (!claim) return { status: "refused", error: "receipt_required" };
+    if (!claimMatches(claim, input)) return { status: "refused", error: "receipt_invalid" };
+    const known = await checkAgentAgainstStore(this.d.store, claim, input.agentId, input.hostAccountId);
+    if (known.problem === "key_mismatch") return { status: "refused", error: "receipt_invalid" };
+    const hostAccountId = known.hostAccountId;
+    const base = Math.max(0, Math.round(input.chargedMsat));
+    if (!(base > 0)) return { status: "refused", error: "nothing_charged" };
+    const nowMs = this.now();
+    const reportId = `result:${input.subtaskId}`;
+    const rounding = this.d.config.feeRounding ?? "nearest";
+    const { agentMsat, feeMsat } = splitJobCost(base, this.d.config.feeBps, rounding);
+    const seconds = input.durationMs / 1000;
+    const r = await this.d.store.persistContributionWithOverflow(
+      {
+        report: {
+          reportId,
+          agentId: hostAccountId,
+          sourceAgentId: input.agentId,
+          taskId: input.taskId,
+          resourceClass: input.resourceClass,
+          cpuSeconds: input.resourceClass === "cpu" ? seconds : 0,
+          gpuSeconds: input.resourceClass === "gpu" ? seconds : 0,
+          success: true,
+          qualityScore: 1,
+          timestampMs: nowMs
+        },
+        accountId: hostAccountId,
+        sourceAgentId: input.agentId,
+        reliabilityScore: 1,
+        weightedContribution: Number(seconds.toFixed(6))
+      },
+      () => {
+        const tx = settleEarnRow(reportId, input.taskId, hostAccountId, agentMsat, "compute_contribution", nowMs);
+        const feeTx = feeMsat > 0 ? settleEarnRow(reportId, input.taskId, NETWORK_FEE_POOL_ACCOUNT, feeMsat, `network_fee:${input.taskId}`, nowMs) : undefined;
+        return { tx, ...(feeTx ? { feeTx } : {}) };
+      }
+    );
+    if (!r.inserted) return { status: "duplicate" };
+    const receiptId = agentClaimId(claim);
+    await this.d
+      .recordAccrual({
+        taskId: input.taskId,
+        subtaskId: input.subtaskId,
+        hostAccountId,
+        routedBy: "",
+        payload: {
+          sourceAgentId: input.agentId,
+          accountId: hostAccountId,
+          credits: roundCredits(agentMsat / 1000),
+          msat: agentMsat,
+          costMsat: base,
+          feeMsat,
+          executedBy: input.executorPeerId,
+          peerWork: true,
+          receiptId,
+          pricingBasis: "peer_work",
+          networkFeeBps: this.d.config.feeBps,
+          feeRounding: rounding,
+          durationMs: input.durationMs,
+          ok: true,
+          resourceClass: input.resourceClass
+        }
+      })
+      .catch((err) => this.d.log?.("ledger_service_accrual_record_failed", { taskId: input.taskId, subtaskId: input.subtaskId, error: String(err) }));
+    return { status: "settled", agentMsat, feeMsat, receiptId };
   }
 
   async refund(peerId: string, body: unknown): Promise<LedgerReply> {

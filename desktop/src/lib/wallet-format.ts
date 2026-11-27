@@ -35,11 +35,24 @@ const REASONS: Record<string, string> = {
   task_submit_refund: "Unused set-aside returned", compute_reservation: "Reserved a machine", reservation_refund: "Reservation time returned",
   compute_contribution: "Earned running jobs", reservation_earning: "Earned from a reservation", payout: "Withdrawal",
   payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share",
+  routing_fee: "Routing fee",
 };
 export function reasonText(r: string): string {
   if (/^credit_purchase:onchain:/.test(String(r || ""))) return "Bitcoin deposit";
   const base = String(r || "").replace(/:.*/, "");
   return REASONS[base] ?? (base.replace(/_/g, " ") || "–");
+}
+
+/** A ledger row in words; a routing fee (routing_fee:<task>) names the coordinator that routed the call. */
+export function activityText(r: { reason: string; coordinator?: string }): string {
+  const base = reasonText(r.reason);
+  return /^routing_fee:/.test(String(r.reason || "")) && r.coordinator ? `${base} (coordinator ${r.coordinator})` : base;
+}
+
+/** "incl. 1.2 sats routing fees" when some of the earnings are routing fees, else "". */
+export function routingFeeNote(sats: number | null | undefined): string {
+  const n = Number(sats) || 0;
+  return n > 0 ? `incl. ${fmtNum(n, 3)} sats routing fees` : "";
 }
 
 /** "Expires in 14:59". */

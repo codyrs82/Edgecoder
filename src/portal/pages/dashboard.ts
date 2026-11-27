@@ -237,6 +237,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
         var desc = tx.reason === "compute_contribution" ? "<strong>Compute contribution</strong> earned" :
                    tx.reason === "task_completion" ? "<strong>Task completed</strong>" :
                    tx.reason === "credit_purchase" ? "<strong>Credits purchased</strong>" :
+                   /^routing_fee:/.test(String(tx.reason || "")) ? "<strong>Routing fee</strong> earned" :
                    "<strong>" + escapeHtml(tx.reason || "Activity") + "</strong>";
         var amount = tx.credits ? " <strong>" + (tx.type === "earn" ? "+" : "-") + escapeHtml(tx.credits) + "</strong> credits" : "";
         var time = timeAgo(tx.createdAtMs || tx.timestamp);

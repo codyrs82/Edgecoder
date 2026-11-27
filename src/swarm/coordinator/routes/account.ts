@@ -30,7 +30,8 @@ import {
 } from "../../../economy/reservations.js";
 import { agentHasModel } from "../../model-catalog.js";
 import { app, type CoordinatorApp } from "../app.js";
-import { reservations, identity, COORDINATOR_PUBLIC_URL, saveUsage, usagePending, memoryUsage } from "../context.js";
+import { reservations, identity, COORDINATOR_PUBLIC_URL, saveUsage, usagePending, memoryUsage, registryTrust } from "../context.js";
+import { accountActivity, coordinatorLabel, routingFeeTaskId } from "../../../ledger-service/earnings-view.js";
 import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { callerAccount } from "../auth.js";
 import { effectiveHardware, hardwareVerifier, NETWORK_FEE_BPS, classRefMsatPerCredit } from "../economy.js";
@@ -146,9 +147,13 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
     const accountId = caller.accountId;
     const balance = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
     const history = pgStore ? await pgStore.creditHistory(accountId) : creditEngine.history(accountId);
-    const recent = [...history].sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 25).map((t) => ({
-      type: t.type, cSats: Number(t.credits), reason: t.reason, taskId: t.relatedTaskId, atMs: t.timestampMs,
-    }));
+    // Routing-fee rows (an operator's share of the calls its coordinator routed) name that coordinator.
+    const routingTasks = [...new Set(history.map((t) => (routingFeeTaskId(t.reason) ? t.relatedTaskId ?? routingFeeTaskId(t.reason)! : null)).filter((x): x is string => !!x))];
+    const routedBy = routingTasks.length > 0 && pgStore ? await pgStore.ledgerServiceTaskPeers(routingTasks).catch(() => new Map<string, string>()) : new Map<string, string>();
+    const { recent, routingFeeSats } = accountActivity(history, (taskId) => {
+      const peerId = routedBy.get(taskId);
+      return peerId ? coordinatorLabel(peerId, registryTrust.member(peerId)) : undefined;
+    });
     // Your machines as this coordinator sees them (the app's Mesh page and "My machines" in the compute picker).
     const owned = new Set([...((await pgStore?.listAgentOwnershipByAccount(accountId)) ?? []).map((o) => o.agentId), accountId]);
     const now = Date.now();
@@ -184,7 +189,7 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
       });
     let networkAgents = 0;
     for (const cap of agentCapabilities.values()) if (now - cap.lastSeenMs < 2 * 60_000) networkAgents++;
-    return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent, machines, networkAgents, coordinator: { peerId: identity.peerId, url: COORDINATOR_PUBLIC_URL } });
+    return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), routingFeeSats, recent, machines, networkAgents, coordinator: { peerId: identity.peerId, url: COORDINATOR_PUBLIC_URL } });
   });
 
   /** Your usage over the last N days: totals, per day, per model / class / source / placement, newest records. */

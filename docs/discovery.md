@@ -382,7 +382,17 @@ The network fee is split at settle: `LEDGER_SERVICE_ROUTING_SHARE_BPS` (default 
 
 Limits per outside coordinator: caps on open reserves and on msat reserved per hour; a cost never above the reserve plus the overflow bound (`LEDGER_SERVICE_OVERFLOW_MAX_PCT`, under the buyer's own ceiling); a settle without a valid agent claim, a cost over the cap, a claim or host that disagrees with what the shared database knows about the agent, or touching another coordinator's task suspends its billing at once and raises an alert (`ledger_service_member_suspended`); other refusals count as disputes and `LEDGER_SERVICE_MAX_DISPUTES` in a day suspend it too. The owner can stop a member's billing on every seed at once (`POST /admin/ledger-service/members/disable`, admin token), lift a suspension (`/enable`), or turn billing off in the registry (no passkey needed to turn it off). Open tasks older than `LEDGER_SERVICE_RESERVE_TTL_MS` are closed and refunded by the seeds.
 
-Not in this phase: subtasks offered between coordinators are not paid through the service, and an outside coordinator bills only calls the portal sent it (the buyer's proof). Federation (per-operator ledgers that reconcile) comes later.
+Routing-fee rows show in the wallet views (portal and desktop) as "Routing fee (coordinator <host>)", and the earnings show how much of them came from routing. They count in the earned, held and payable totals and pay out like host earnings.
+
+**Peer work** (a subtask offered to peers, granted to one and run there, `src/swarm/remote-grants.ts`): the coordinator that took the buyer (the origin, which owns the task and its reserve) charges it when the result comes back, and pays the executing coordinator's host on the shared ledger itself when either side bills through the service (`results.ts chargeAndPayPeerWork`):
+
+- origin bills through the service: it settles the subtask there with `peerWork: { executorPeerId }`. The routing share is the origin's; the host is the agent's owner as the shared database knows it. A claim the database cannot match is refused as a dispute, not a suspension, since the origin relays the executor's claim;
+- origin is a seed, executor bills through the service (it says so in its signed forward, `executorBilling`): the seed pays the host on its own database (`LedgerService.settleSeedPeerWork`), the whole fee to the pool;
+- seed to seed: the executor pays its host, as before.
+
+The answer to the forward says `hostPaidBy: "origin"` and the executor pays nothing. Every path records the report `result:<subtaskId>`, the id the executor's own accrual uses, so a subtask is paid once whoever records it first. The executor's operator gets no routing share for peer work: it did not take the buyer, and its host is paid in full. A refused or failed payment charges the buyer nothing.
+
+Not in this phase: an outside coordinator bills only calls the portal sent it (the buyer's proof). Federation (per-operator ledgers that reconcile) comes later.
 
 ### Latency DNS (later ops step)
 
