@@ -117,9 +117,12 @@ export class RegistryTrust {
     return this.current()?.coordinators.find((c) => c.peerId === peerId);
   }
 
-  /** The portal's action-signing public keys the verified, unexpired registry publishes (raw base64). */
+  /**
+   * The portal's action-signing public keys the verified, unexpired registry publishes (raw base64).
+   * Read-only: the refresh schedule (start()) keeps the registry current, so a portal check never
+   * makes a fetch of its own.
+   */
   portalActionKeys(): string[] {
-    this.maybeRefresh();
     return this.current()?.portalActionKeys ?? [];
   }
 

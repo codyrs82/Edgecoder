@@ -137,7 +137,8 @@ const PUBLIC: Record<string, string> = {
   "POST /agents/signup": "agent signup, proven by a key signature",
   // Signed, public by design (coordinators and nodes verify the signature).
   "GET /network/registry": "signed public registry",
-  "GET /network/registry/public-key": "registry verification key"
+  "GET /network/registry/public-key": "registry verification key",
+  "GET /network/portal-keys": "portal action public keys (also in the signed registry)"
 };
 
 /** Which credential a protected route takes; everything not matched here takes a portal session. */

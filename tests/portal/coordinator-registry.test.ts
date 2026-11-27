@@ -13,12 +13,11 @@ import {
   admissionProblems,
   keyRotationPayload,
   parseRegistrySeeds,
-  registerRegistryRoutes,
   registryServiceFromEnv,
   type PoolMember,
-  type RegistryFetch,
-  type RegistryPasskey
+  type RegistryFetch
 } from "../../src/portal/coordinator-registry.js";
+import { registerRegistryRoutes, type RegistryPasskey } from "../../src/portal/coordinator-registry-routes.js";
 
 function signingKeyPem(): string {
   return generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString();

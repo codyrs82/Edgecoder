@@ -10,7 +10,8 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { CoordinatorRegistryService, RegistryPasskey, ServiceResult } from "./coordinator-registry.js";
+import type { CoordinatorRegistryService, ServiceResult } from "./coordinator-registry.js";
+import type { RegistryPasskey } from "./coordinator-registry-routes.js";
 import type { StoredMember } from "./coordinator-registry-store.js";
 
 export async function setMemberBilling(
