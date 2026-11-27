@@ -263,6 +263,18 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
     return "waiting";
   }
   if (currentCan && p.graced) notePickupFailure(p, nowMs);
+  // Run 23 (inf-1795764193868-a3121ad9, a sin buyer on the EU coordinator: placed on sin, moved to fra
+  // at 1.5 s, refused at 1.69 s, 2.46 s at the portal, with the US cloud free): once the host it was
+  // placed on has had its window (or it was moved already), a peer that can take it now gets it at
+  // this decision, not after another local move at the end of the bound. Not while a cloud host here
+  // has room (the overflow here comes first).
+  if (!final && p.mayHandOver && (p.graced || (p.replaced ?? 0) > 0) && !localCloudHasRoom(nowMs)) {
+    const early = await peerHandover(p, nowMs);
+    if (early && queue.isUnclaimed(p.subtaskId) && admission && (await admission.refuse(p, undefined, early))) {
+      app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: "handed_over", elapsedMs: nowMs - (usagePending.get(p.taskId)?.atMs ?? nowMs), tried: p.tried, current: current ?? null, handedOverTo: early.peerUrl }, "auto_call_refused_no_host");
+      return "refused";
+    }
+  }
   const movesLeft = !final && (p.replaced ?? 0) < AUTO_REPLACE_MAX;
   // Run 11: past its bound or its move limit, still the cloud overflow (once) before a refusal.
   const pick = movesLeft ? await nextPick(p, nowMs) : !p.overflowed ? await nextPick(p, nowMs, { cloudOnly: true }) : undefined;
@@ -424,6 +436,22 @@ async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boo
  * redirects sends the call there at once, as a route_elsewhere answer. Only for a call whose caller
  * follows redirects and that no peer sent here (no ping-pong).
  */
+/**
+ * Run 23 (inf-1795764143979-3de61b27, -143926-ce5077dc: long-prompt Auto calls from lhr and jnb
+ * buyers that no EU host would finish in time, refused at submit): a peer best fit picks for the
+ * call, without this coordinator's hosts, with a free slot there: where to send it instead.
+ */
+export async function peerFor(job: JobDescriptor, opts: { accountId: string; clientRegion?: string | null; onlyClass?: string; exclude?: readonly string[] }, nowMs = Date.now()): Promise<{ coordinatorId: string; url: string } | undefined> {
+  const localIds = localAgentViews(nowMs).map((a) => a.agentId);
+  const r = await resolveAuto(job, { peers: true, requesterAccountId: opts.accountId, excludeAgents: [...new Set([...(opts.exclude ?? []), ...localIds])], clientRegion: opts.clientRegion ?? null, ...(opts.onlyClass ? { computeClass: opts.onlyClass } : {}) }, nowMs).catch(() => undefined);
+  return r?.elsewhere?.url && r.result.capacity !== "queued" ? r.elsewhere : undefined;
+}
+
+/** A cloud host here has a free slot (the overflow here comes before a handover). */
+function localCloudHasRoom(nowMs: number): boolean {
+  return localAgentViews(nowMs).some((a) => a.computeClass === "cloud" && a.freeSlots > 0 && !a.unhealthy);
+}
+
 async function peerHandover(p: AutoPlacement, nowMs: number): Promise<{ peerUrl: string } | undefined> {
   const localIds = localAgentViews(nowMs).map((a) => a.agentId);
   const r = await resolveAuto(p.job, { peers: true, requesterAccountId: p.accountId, excludeAgents: [...new Set([...p.tried, ...localIds])], clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs).catch(() => undefined);

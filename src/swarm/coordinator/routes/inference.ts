@@ -70,7 +70,7 @@ import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace, autoPlacementOf, cloudOverflowReserveMsat, overrunAlternativeExists, rearmAutoDecision, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
+import { armAutoReplace, autoPlacementOf, cloudOverflowReserveMsat, peerFor, overrunAlternativeExists, rearmAutoDecision, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, LOCALITY_PULL_HOLD_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
 import { agentHeldBack, agentStolenRecently, agentWithholding, type ClassCompletion, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 import { expectedOutputTokens, judgedOutputOf, noteJudgedOutput, pruneJudged } from "../expected-output.js";
@@ -1428,6 +1428,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // with what it needs (a tentacle helper then waits for room and sends it again, #594, #621).
           req.log.info({ taskId: body.taskId, slowAgents: slowAgents.length, neededCSats: last.result.cheapestCSats, maxCSats: job.maxCSats ?? null }, "inference_cloud_over_price_ceiling");
           return noCapacityReply(reply as any, { reason: "price", model: AUTO_MODEL_ID, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC, neededCSats: last.result.cheapestCSats });
+        }
+      }
+      if (!result.chosen && slowAgents.length > 0 && body.routeRedirect && !body.redirected) {
+        // Run 23: nothing here would finish (or start) it in time, a peer has a free host that can: sent there, before anything is reserved.
+        const peer = await peerFor(job, { accountId, clientRegion, ...(onlyClass ? { onlyClass } : {}), exclude: slowAgents });
+        if (peer) {
+          req.log.info({ taskId: body.taskId, slowAgents: slowAgents.length, peer: peer.coordinatorId, ...(late ?? {}) }, "inference_completion_over_limit_handed_over");
+          recordMeshWork(peer.coordinatorId);
+          return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, reason: "completion_eta" });
         }
       }
       if (!result.chosen && slowAgents.length > 0) {

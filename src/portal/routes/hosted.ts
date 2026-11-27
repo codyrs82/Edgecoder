@@ -85,6 +85,11 @@ export interface CallTrace {
   /** A request to the coordinator that failed in the portal (the connection, a timeout): path and error code. */
   upstreamError?: string;
   /**
+   * Run 23: a coordinator named another (route_elsewhere, or a no_capacity "elsewhere") that this
+   * portal does not know, so the call was run on the first one again: the URL it named.
+   */
+  redirectNotFollowed?: string;
+  /**
    * What answered: from the done read of the attempt that answered (the coordinator's servedModel and
    * served-by). A new submit (a failover or a redirect) clears it, so it never names an earlier attempt.
    */
@@ -292,7 +297,11 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
             autoChoice = r.choice;
             return r.url;
           },
-          allowed: (url) => capacity.isKnown(url),
+          allowed: async (url) => {
+            const known = await capacity.isKnown(url);
+            if (!known) ctx.trace.redirectNotFollowed = url.slice(0, 200);
+            return known;
+          },
           run: (url, routeRedirect) => {
             autoUrl = url;
             return networkBackend(pinnedDeps(url, ctx.accountId), {
@@ -328,7 +337,11 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         let sentTo = first;
         const redirecting = redirectingNetworkBackend({
           url: first,
-          allowed: (url) => capacity.isKnown(url),
+          allowed: async (url) => {
+            const known = await capacity.isKnown(url);
+            if (!known) ctx.trace.redirectNotFollowed = url.slice(0, 200);
+            return known;
+          },
           run: (url, routeRedirect) => {
             sentTo = url;
             return networkBackend(url === first ? placed.deps : pinnedDeps(url, ctx.accountId), { ...target, ...region, routeRedirect, drainFailover: true, ...(placed.choice && url === first ? { coordinatorChoice: placed.choice } : {}) });
