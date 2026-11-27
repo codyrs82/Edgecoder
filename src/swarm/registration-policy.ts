@@ -251,3 +251,27 @@ export class RegisterDeniedLog {
     return { suppressed };
   }
 }
+
+/**
+ * Masks a client address for logs: IPv4 to its /24, IPv6 to its /48 (IPv4-mapped IPv6 as IPv4).
+ * No full address is ever returned; anything unparseable yields undefined.
+ */
+export function maskClientIp(ip: string | undefined): string | undefined {
+  if (!ip) return undefined;
+  const raw = ip.trim().replace(/^::ffff:/i, "");
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+  if (v4) {
+    if (v4.slice(1).some((n) => Number(n) > 255)) return undefined;
+    return `${v4.slice(1, 4).map(Number).join(".")}.0/24`;
+  }
+  if (!raw.includes(":") || !/^[0-9a-f:]+$/i.test(raw)) return undefined;
+  const halves = raw.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return undefined;
+  const groups = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => g.length === 0 || g.length > 4)) return undefined;
+  return `${groups.slice(0, 3).map((g) => parseInt(g, 16).toString(16)).join(":")}::/48`;
+}

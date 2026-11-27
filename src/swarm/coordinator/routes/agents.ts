@@ -6,7 +6,7 @@
  */
 import { noteLocalWebReport } from "../local-web.js";
 import { z } from "zod";
-import { RegisterDeniedLog } from "../../registration-policy.js";
+import { RegisterDeniedLog, maskClientIp } from "../../registration-policy.js";
 import type { SandboxMode } from "../../../common/types.js";
 import { cleanRegion } from "../../../common/coordinator-choice.js";
 import { rewardAccountForAgent } from "../../../credits/store.js";
@@ -155,7 +155,18 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       if (!origin.loopback) preAuthFailures.record(failureKey);
       // Network run 14: once per agent and reason per 10 min (registration-policy.ts RegisterDeniedLog).
       const logLine = registerDeniedLog.take(body.agentId, String(activation.reason ?? ""), Date.now());
-      if (logLine) app.log.warn({ agentId: body.agentId, reason: activation.reason, ...(logLine.suppressed ? { suppressedSinceLast: logLine.suppressed } : {}) }, "register_denied");
+      if (logLine) {
+        const userAgent = (req.headers as Record<string, unknown>)["user-agent"];
+        app.log.warn({
+          agentId: body.agentId,
+          reason: activation.reason,
+          // Masked (/24, /48): tells which device keeps retrying without logging a full address.
+          client: maskClientIp(sourceIp) ?? null,
+          userAgent: typeof userAgent === "string" ? userAgent.slice(0, 120) : null,
+          appVersion: body.version ?? null,
+          ...(logLine.suppressed ? { suppressedSinceLast: logLine.suppressed } : {})
+        }, "register_denied");
+      }
       // tokenNodeId: the agent's own token's node id (it named itself differently), so its log can say which name to use.
       return reply.code(403).send({ error: "node_not_activated", reason: activation.reason, ...(activation.tokenNodeId ? { tokenNodeId: activation.tokenNodeId } : {}) });
     }

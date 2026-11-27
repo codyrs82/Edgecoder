@@ -8,6 +8,7 @@ import {
   enrollmentRefusalMessage,
   portalLabel,
   isAgentNotRegisteredError,
+  maskClientIp,
   isNotRegisteredWsClose,
   QuickReregisterGate,
   QUICK_REREGISTER_MIN_INTERVAL_MS,
@@ -175,5 +176,20 @@ describe("enrolment refusals: one clear line and a long back-off", () => {
     // Another reason for the same agent is its own line.
     expect(log.take("macbook-pro-crs-local-gpu", "registration_token_invalid", 15_002)).toEqual({ suppressed: 0 });
     expect(log.take("macbook-pro-crs-local-gpu", "registration_token_required", REGISTER_DENIED_LOG_INTERVAL_MS + 1)).toEqual({ suppressed: 1 });
+  });
+});
+
+describe("maskClientIp", () => {
+  it("masks IPv4 to /24 and IPv6 to /48", () => {
+    expect(maskClientIp("203.0.113.57")).toBe("203.0.113.0/24");
+    expect(maskClientIp("::ffff:198.51.100.9")).toBe("198.51.100.0/24");
+    expect(maskClientIp("2001:db8:abcd:12:34::1")).toBe("2001:db8:abcd::/48");
+    expect(maskClientIp("2001:db8::1")).toBe("2001:db8:0::/48");
+  });
+  it("returns undefined for missing or invalid input", () => {
+    expect(maskClientIp(undefined)).toBeUndefined();
+    expect(maskClientIp("not-an-ip")).toBeUndefined();
+    expect(maskClientIp("300.1.1.1")).toBeUndefined();
+    expect(maskClientIp("1:2:3")).toBeUndefined();
   });
 });
