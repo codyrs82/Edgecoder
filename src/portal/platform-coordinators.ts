@@ -68,6 +68,38 @@ export function regionForCountry(countryCode: string | undefined | null): string
   return null;
 }
 
+/** Fly.io edge regions -> the platform region they serve ("us", "eu"); others are null (no regional pick). */
+const FLY_REGION_AREA: Record<string, "us" | "eu"> = {
+  iad: "us", ord: "us", lax: "us", sjc: "us", sea: "us", dfw: "us", den: "us", ewr: "us", atl: "us", mia: "us", bos: "us", phx: "us", chi: "us", yyz: "us", yul: "us", qro: "us",
+  lhr: "eu", ams: "eu", fra: "eu", cdg: "eu", mad: "eu", arn: "eu", waw: "eu", otp: "eu",
+};
+
+/** The platform region of a Fly edge region code ("lhr" -> "eu"), or null when unknown. */
+export function regionForFlyRegion(code: string | undefined | null): string | null {
+  return FLY_REGION_AREA[(code ?? "").trim().toLowerCase()] ?? null;
+}
+
+function headerValue(raw: unknown): string | undefined {
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * Network run 22 (every enrolment answered region "unknown", so lhr and fra agents got the US
+ * coordinator): where the request itself came from, for an agent whose country is not known. Cloudflare's
+ * CF-IPCountry (when the portal sits behind Cloudflare), else Fly's Fly-Region (the edge region the
+ * request came in through). Null when neither names a known region. Either only steers the pick
+ * among the platform's own coordinators.
+ */
+export function regionFromRequestHeaders(headers: Record<string, unknown> | undefined): { region: string; from: "cf-ipcountry" | "fly-region" } | null {
+  if (!headers) return null;
+  const cc = regionForCountry(headerValue(headers["cf-ipcountry"]));
+  if (cc) return { region: cc, from: "cf-ipcountry" };
+  const fly = regionForFlyRegion(headerValue(headers["fly-region"]));
+  if (fly) return { region: fly, from: "fly-region" };
+  return null;
+}
+
 export interface PlatformPickerOptions {
   coordinators: PlatformCoordinator[];
   /** Resolves true when `url` is healthy; must apply its own timeout. */
@@ -89,11 +121,12 @@ export function verifiedRegistryCoordinators(registry: { configured: boolean; sn
 }
 
 /**
- * Picks a platform coordinator for an agent: candidates in the agent's region first, then the rest
+ * Picks a platform coordinator for an agent: candidates in the agent's region (its country, else the
+ * `region` given, e.g. from the request) first, then the rest
  * in configured order; the first healthy one wins. Configured URLs are probed in parallel and each
  * result cached (60 s healthy, 15 s unhealthy); registry members carry the registry's own check.
  */
-export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (agent: { countryCode?: string | null }) => Promise<PlatformCoordinator | null> {
+export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (agent: { countryCode?: string | null; region?: string | null }) => Promise<PlatformCoordinator | null> {
   const ttl = opts.ttlMs ?? 60_000;
   const negTtl = opts.negativeTtlMs ?? 15_000;
   const now = opts.now ?? Date.now;
@@ -126,7 +159,8 @@ export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (a
       if (same) Object.assign(same, { nodeId: same.nodeId ?? r.nodeId });
       else candidates.push(r);
     }
-    const region = regionForCountry(agent.countryCode);
+    // The agent's country first; else a region found from the request (regionFromRequestHeaders).
+    const region = regionForCountry(agent.countryCode) ?? (agent.region ? agent.region.trim().toLowerCase() || null : null);
     const ordered = region ? [...candidates.filter((c) => c.region === region), ...candidates.filter((c) => c.region !== region)] : candidates;
     const registryUrls = new Set(fromRegistry.map((r) => r.url));
     const results = await Promise.all(ordered.map((c) => (registryUrls.has(c.url) ? Promise.resolve(true) : healthy(c.url))));

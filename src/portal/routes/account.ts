@@ -13,6 +13,7 @@ import { rejectedAttemptsForOwner } from "../rejected-attempts.js";
 import { moduleLogger } from "../../common/logger.js";
 import { registerChatSharingRoutes } from "./chat-sharing.js";
 import { askEveryCoordinator, getCoordinatorJson } from "../coordinator-fanout.js";
+import { regionForCountry, regionFromRequestHeaders } from "../platform-coordinators.js";
 
 const logger = moduleLogger("portal-account");
 
@@ -28,7 +29,7 @@ export function maxAgentsPerAccount(env: NodeJS.ProcessEnv = process.env): numbe
   return Number.isInteger(n) && n >= 1 ? n : 25;
 }
 
-export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, pickPlatformCoordinator, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, pickPlatformCoordinator, lookupCallerCountry, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
   // iOS app summary: account, node, job-count and network info. The iPhone does not show what
   // hosting earned, so neither route returns earnings, balance or payout figures. Both stay (no 404)
   // for older app builds; no shipped build decodes the removed fields (DashboardView was unreachable
@@ -290,8 +291,19 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     }
     // Only the platform's own coordinators (src/portal/platform-coordinators.ts): the configured
     // list plus verified EdgeCoder members of the signed registry when it is on. The agent's last
-    // known country picks the region; otherwise the first healthy one in order.
-    const selected = await pickPlatformCoordinator({ countryCode: enrollment.lastCountryCode });
+    // known country picks the region. Network run 22: without one (a new enrolment, or a lookup that
+    // gave no country), where this request came from: CF-IPCountry, else Fly-Region, else the
+    // caller's IP looked up. Otherwise the first healthy one in order.
+    let countryCode = enrollment.lastCountryCode;
+    let region: string | null = null;
+    if (!regionForCountry(countryCode)) {
+      region = regionFromRequestHeaders(req.headers as Record<string, unknown>)?.region ?? null;
+      if (!region && lookupCallerCountry) {
+        const looked = await lookupCallerCountry(req).catch(() => undefined);
+        if (regionForCountry(looked)) countryCode = looked;
+      }
+    }
+    const selected = await pickPlatformCoordinator(region ? { countryCode, region } : { countryCode });
     if (!selected) {
       return reply.send({ coordinatorUrl: null, reason: "no_healthy_platform_coordinator" });
     }

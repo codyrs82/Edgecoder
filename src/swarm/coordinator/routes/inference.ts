@@ -15,7 +15,8 @@ import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, agentLoadReport, claimCandidates, freeModelSlots, preferAgent, preferenceOf, releasePreference, setClaimAdmission } from "../dispatch.js";
+import { agentContextWindow, agentLoadReport, claimCandidates, freeModelSlots, preferAgent, preferenceOf, releasePreference, setClaimAdmission, setRefusalReplacement } from "../dispatch.js";
+import { powerRefuses } from "../power-limits.js";
 import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmits, modelLoadedOn, onCircuitTrip, setCircuitSlotsLookup } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
@@ -266,9 +267,41 @@ export async function moveCallsOffTrippedAgent(agentId: string, nowMs = Date.now
 
 /** Named network calls and the agent they were placed on (#526 locality preference), while unclaimed. */
 const namedPlacements = new Map<string, string>();
+/** Network run 22: the buyer's region for a named call placed by locality, while unclaimed (placeAfterRefusal). */
+const namedClientRegions = new Map<string, string>();
 setInterval(() => {
   for (const id of namedPlacements.keys()) if (queue.getClaim(id)?.claimedBy || !queue.getSubtask(id)) namedPlacements.delete(id);
+  for (const id of namedClientRegions.keys()) if (queue.getClaim(id)?.claimedBy || !queue.getSubtask(id)) namedClientRegions.delete(id);
 }, 60_000).unref?.();
+
+/**
+ * Network run 22 (inf-1795742684105-60f32074, fra buyer -> lax): the host a call was held for cannot
+ * take it (its power state refuses it: dispatch.ts releaseRefusedHold). A named call is held next for
+ * the nearest free host that can (locality, as at submit, without that host); an Auto call is placed
+ * again by best fit (auto-replace.ts), which leaves that host out too. Before, the hold was spent on
+ * the refusing host's claim and the call went to whichever host pulled first.
+ */
+export function placeAfterRefusal(subtaskId: string, refusedBy: string, nowMs = Date.now()): string | undefined {
+  if (autoPlacementOf(subtaskId)) {
+    void replaceAutoNow(refusedBy, nowMs).catch((err) => coordinatorApp.log.error({ err, subtaskId }, "auto_replace_failed"));
+    return undefined;
+  }
+  const st = queue.getSubtask(subtaskId);
+  const clientRegion = namedClientRegions.get(subtaskId);
+  if (!st?.requestedModel || !clientRegion || !queue.isUnclaimed(subtaskId)) return undefined;
+  const excluded = new Set([refusedBy, ...queue.excludedAgents(st.id)]);
+  const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
+  const near = nearestFreeHolder(freeLocalHolders(st.requestedModel, cls, inferenceTokensNeededOf(st), nowMs, st.timeoutMs).filter((h) => !excluded.has(h.agentId)), clientRegion, st.requestedModel);
+  if (!near) {
+    namedPlacements.delete(subtaskId);
+    return undefined;
+  }
+  preferAgent(subtaskId, near.agentId, LOCALITY_PREFER_MS, nowMs, { untilPullMs: LOCALITY_PULL_HOLD_MS });
+  namedPlacements.set(subtaskId, near.agentId);
+  coordinatorApp.log.info({ taskId: st.taskId, subtaskId, refusedBy, agentId: near.agentId, km: Math.round(near.km) }, "locality_replaced_after_refusal");
+  return near.agentId;
+}
+setRefusalReplacement((subtaskId, refusedBy, nowMs) => void placeAfterRefusal(subtaskId, refusedBy, nowMs));
 
 /**
  * Run 5 (3a probe, inf-1795598815019-*): a call whose placement was lost waited out the 45 s claim
@@ -300,7 +333,7 @@ export async function moveCallsOffLostAgent(agentId: string, nowMs = Date.now())
     if (!placedHere && !(heldHere && !usableHolderExists(st, claims, nowMs))) continue;
     const excluded = new Set([agentId, ...queue.excludedAgents(st.id)]);
     const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
-    const room = freeLocalHolders(st.requestedModel, cls, inferenceTokensNeededOf(st), nowMs).filter((h) => !excluded.has(h.agentId));
+    const room = freeLocalHolders(st.requestedModel, cls, inferenceTokensNeededOf(st), nowMs, st.timeoutMs).filter((h) => !excluded.has(h.agentId));
     if (room.length > 0) {
       namedPlacements.delete(st.id);
       continue;
@@ -1235,6 +1268,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // capacity, and an agent under memory pressure or with its circuit open has no free slot.
       const held = claims.get(id)?.inference ?? 0;
       const unavailable = agentUnavailable(id, now);
+      const powerOff = powerRefuses(id, undefined, now);
       for (const m of new Set(routableModels(cap))) {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
@@ -1243,9 +1277,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         e.agents++;
         e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
         (classAgents[cls] ??= new Set()).add(id);
-        if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
+        if (queue.agentClaims(id) === 0 && !unavailable && !powerOff) e.idle++;
         // Run 8: a held-back host (CPU steal, or not pulling with an idle slot) has no free slot to offer.
-        const free = unavailable || !memoryAdmits(id, m, held, now) || agentHeldBack(id, held, now) ? 0 : freeModelSlots(id, claims);
+        // Network run 22 (desktop-maw-mb-02, laptop_battery_low): nor one whose power state refuses model
+        // calls: it was offered as a free Apple host and won the portal's latency rule for calls it never ran.
+        const free = unavailable || powerOff || !memoryAdmits(id, m, held, now) || agentHeldBack(id, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
         // #526: where the free slots are, so the portal can send a buyer to the coordinator with a free host near it.
         const region = free > 0 ? agentRegionCode(cap) : null;
@@ -1451,7 +1487,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     } else {
       // A named network model with no free slot here that a peer has free (#526): resubmit there,
       // before anything is reserved (the same redirect as an Auto call whose best fit is on a peer).
-      if (body.routeRedirect && !routed && !restrictedTier && sumFree(freeLocalHolders(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS))) <= queue.waitingInference(body.model)) {
+      if (body.routeRedirect && !routed && !restrictedTier && sumFree(freeLocalHolders(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), undefined, body.timeoutMs)) <= queue.waitingInference(body.model)) {
         const peer = await peerWithFreeCapacity(body.model, body.computeClass, clientRegion, Date.now(), peerFit(body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs)).catch(() => null);
         if (peer) {
           recordMeshWork(peer.coordinatorId);
@@ -1616,10 +1652,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
       }
       // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
-      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens).filter((h) => !slowAgents.includes(h.agentId)), clientRegion, body.model) : undefined;
+      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens, undefined, body.timeoutMs).filter((h) => !slowAgents.includes(h.agentId)), clientRegion, body.model) : undefined;
       if (near) {
         preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS, undefined, { untilPullMs: LOCALITY_PULL_HOLD_MS });
         namedPlacements.set(subtask.id, near.agentId);
+        if (clientRegion) namedClientRegions.set(subtask.id, clientRegion);
       }
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {

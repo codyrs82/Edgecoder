@@ -40,6 +40,7 @@ import { agentHeldBack, callWorkMs, decodeEstimateMs, serviceTimes } from "./sta
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentFlapping } from "./agent-liveness.js";
+import { powerRefuses } from "./power-limits.js";
 import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
 
 /** How long the nearest free holder keeps a named-model call before anyone eligible may take it (longer than DEFER_MS). */
@@ -81,7 +82,11 @@ export interface FreeHolder {
   pulling?: boolean;
 }
 
-export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): FreeHolder[] {
+/**
+ * `timeoutMs`: the call's time limit, for the hosts' power limits (network run 22: a laptop on low
+ * battery takes small jobs only and is not a free holder for a model call); undefined: any model call.
+ */
+export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now(), timeoutMs?: number): FreeHolder[] {
   const claims = queue.activeClaims();
   const out: FreeHolder[] = [];
   for (const [id, cap] of agentCapabilities) {
@@ -90,6 +95,8 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
     if (nowMs - cap.lastSeenMs > 60_000) continue;
     // Run 6: an agent that keeps dropping out is not capacity (agent-liveness.ts agentFlapping).
     if (agentFlapping(id, nowMs)) continue;
+    // Network run 22: nor one whose power state refuses the call (power-limits.ts).
+    if (powerRefuses(id, timeoutMs, nowMs)) continue;
     const cls = effectiveHardware(id, cap)?.computeClass ?? cap.computeClass ?? "cpu";
     if (taskClass !== "any" && cls !== taskClass) continue;
     const ctx = agentContextWindow(id);
