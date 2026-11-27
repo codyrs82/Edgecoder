@@ -5,6 +5,7 @@
  * Request authentication helpers: mesh token, portal service token, signed agent requests
  * and the admin token.
  */
+import type { KeyObject } from "node:crypto";
 import {
   readHeaderValue,
   extractClientIp,
@@ -32,7 +33,7 @@ import {
   PORTAL_SERVICE_TOKEN_INBOUND,
   ADMIN_API_TOKENS,
   ADMIN_ORIGIN_POLICY,
-  PORTAL_ACTION_KEYS,
+  portalActionKeys,
   REQUIRE_PORTAL_ACTION_SIGNATURE,
   CLIENT_IP_TRUST,
   requestOrigin,
@@ -563,10 +564,10 @@ export async function requirePortalMoneyAction(
   req: any,
   reply: any,
   expected: { accountId: string; action: PortalAction; body: Record<string, unknown> },
-  opts: { require?: boolean; keys?: typeof PORTAL_ACTION_KEYS } = {}
+  opts: { require?: boolean; keys?: readonly KeyObject[] } = {}
 ): Promise<boolean> {
   const required = opts.require ?? REQUIRE_PORTAL_ACTION_SIGNATURE;
-  const keys = opts.keys ?? PORTAL_ACTION_KEYS;
+  const keys = opts.keys ?? portalActionKeys();
   const header = readHeaderValue(req.headers ?? {}, PORTAL_ACTION_HEADER);
   const log = (req as { log?: { warn: (o: unknown, m: string) => void; info: (o: unknown, m: string) => void } }).log;
   if (!header) {

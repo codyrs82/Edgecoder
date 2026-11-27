@@ -124,7 +124,18 @@ First rollout:
 4. Coordinators: `REQUIRE_PORTAL_ACTION_SIGNATURE=true`. From now on the service token alone cannot
    withdraw or change a destination.
 
-Rotation:
+Coordinators that leave `PORTAL_ACTION_VERIFY_KEYS` unset take the key from the signed registry
+(`portalActionKeys`: the public half of `PORTAL_ACTION_SIGNING_KEY`, then every key in
+`PORTAL_ACTION_PREVIOUS_VERIFY_KEYS`). For them, rotate on the portal alone:
+
+1. Portal: keep the old signing key, set `PORTAL_ACTION_PREVIOUS_VERIFY_KEYS=<new public>` so the
+   registry already lists the new key. Wait one registry lifetime (15 minutes) for coordinators to
+   refresh.
+2. Portal: `PORTAL_ACTION_SIGNING_KEY=<new private>`, `PORTAL_ACTION_PREVIOUS_VERIFY_KEYS=<old public>`.
+   The registry lists both keys during the overlap.
+3. After another registry lifetime: unset `PORTAL_ACTION_PREVIOUS_VERIFY_KEYS`.
+
+Rotation for coordinators that set `PORTAL_ACTION_VERIFY_KEYS`:
 
 1. Coordinators: `PORTAL_ACTION_VERIFY_KEYS=<old public>,<new public>`.
 2. Portal: `PORTAL_ACTION_SIGNING_KEY=<new private>`.

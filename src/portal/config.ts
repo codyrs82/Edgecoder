@@ -7,7 +7,7 @@ import { socialEnv } from "../social/config.js";
 import { growthEnv } from "../growth/config.js";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
 import { computeClassEnv, discoveryEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, rotationEnv, serviceUrlsEnv, webReplyEnv } from "../config/shared.js";
-import { parseSigningKey } from "../security/portal-action.js";
+import { parseSigningKey, parseVerifyKeys } from "../security/portal-action.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -73,6 +73,17 @@ export const portalConfigSchema = z.object({
    * Ed25519 private key the portal signs withdraw / payout-destination requests with
    * (src/security/portal-action.ts); the coordinators hold the public key (PORTAL_ACTION_VERIFY_KEYS).
    */
+  /** Previous portal action public key(s), published in the signed registry while a rotation overlaps. */
+  PORTAL_ACTION_PREVIOUS_VERIFY_KEYS: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      try {
+        parseVerifyKeys(v);
+      } catch (e) {
+        ctx.addIssue({ code: "custom", message: e instanceof Error ? e.message : String(e) });
+      }
+    }),
   PORTAL_ACTION_SIGNING_KEY: z
     .string()
     .optional()

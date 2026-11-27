@@ -17,7 +17,7 @@ import { LedgerServiceClient, ledgerServiceUrlFromEnv } from "../../ledger-servi
 import { rawBodyOf } from "../../security/request-signing.js";
 import { DEFAULT_DISCOVERY_URL } from "../../portal/coordinator-discovery.js";
 import { app, type CoordinatorApp } from "./app.js";
-import { CC, coordinatorKeys, identity, PORTAL_ACTION_KEYS, registryTrust, securityLog } from "./context.js";
+import { CC, coordinatorKeys, identity, portalActionKeys, registryTrust, securityLog } from "./context.js";
 import { ordering } from "./agent-state.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
 
@@ -27,7 +27,7 @@ export const ledgerService: LedgerService | null = pgStore
       store: pgStore,
       config: ledgerServiceConfigFromEnv(CC),
       member: (peerId) => registryTrust.member(peerId),
-      portalKeys: () => PORTAL_ACTION_KEYS,
+      portalKeys: () => [...portalActionKeys()],
       recordAccrual: async (r) => {
         const record = ordering.append({
           eventType: "earnings_accrual",

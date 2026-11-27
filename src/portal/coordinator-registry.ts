@@ -21,12 +21,12 @@
 // failing past REGISTRY_IDENTITY_SUSPEND_AFTER_MS is suspended. Every admission, approval,
 // suspension, key change and status change goes to the append-only, hash-chained audit table.
 
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { fingerprintMatches, publicKeyFingerprint, tryPublicKeyFingerprint } from "../security/key-fingerprint.js";
 import { verifyPayload } from "../mesh/peer.js";
+import { parseSigningKey, parseVerifyKeys, publicKeyBase64 } from "../security/portal-action.js";
 import { normalizeCoordinatorUrl } from "../discovery/types.js";
-import { registerRegistryBillingRoute, setMemberBilling } from "./coordinator-registry-billing.js";
+import { setMemberBilling } from "./coordinator-registry-billing.js";
 import type { FetchResponseLike } from "../discovery/selector.js";
 import { newChallengeNonce, verifyIdentityChallenge, IDENTITY_CHALLENGE_PATH } from "../trust/identity-challenge.js";
 import {
@@ -376,6 +376,11 @@ export interface RegistryServiceOptions {
   /** Looks up an applicant's account: verified email and passkeys are required to apply. */
   operatorAccount?: (userId: string) => Promise<OperatorAccount>;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /**
+   * The portal's action-signing public keys to publish (raw Ed25519, base64): the current key's
+   * public half, then PORTAL_ACTION_PREVIOUS_VERIFY_KEYS during a rotation. Never a private key.
+   */
+  portalActionKeys?: string[];
 }
 
 export type ServiceResult<T = Record<string, never>> = ({ ok: true } & T) | { ok: false; status: number; error: string; problems?: string[] };
@@ -402,6 +407,7 @@ export class CoordinatorRegistryService {
   readonly maxMembersPerOperator: number;
   private readonly operatorAccount: ((userId: string) => Promise<OperatorAccount>) | null;
   private readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  private readonly portalKeys: string[];
   private readonly health = new Map<string, MemberHealth>();
   private cache: StoredMember[] = [];
   private seeded = false;
@@ -427,6 +433,12 @@ export class CoordinatorRegistryService {
     this.maxMembersPerOperator = Math.max(1, opts.maxMembersPerOperator ?? DEFAULT_MAX_MEMBERS_PER_OPERATOR);
     this.operatorAccount = opts.operatorAccount ?? null;
     this.log = opts.log ?? (() => {});
+    this.portalKeys = [...new Set(opts.portalActionKeys ?? [])];
+  }
+
+  /** The portal's action-signing public keys this registry publishes (current first). */
+  portalActionKeys(): string[] {
+    return [...this.portalKeys];
   }
 
   get configured(): boolean {
@@ -573,7 +585,15 @@ export class CoordinatorRegistryService {
           ...(m.operatorKind === "community" && m.billingEnabled === true ? { billingEnabled: true } : {})
         };
       });
-    return { v: 1, network: this.network, issuedAtMs, expiresAtMs: issuedAtMs + this.ttlMs, coordinators, fallbackUrls: this.fallbackUrls };
+    return {
+      v: 1,
+      network: this.network,
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + this.ttlMs,
+      coordinators,
+      fallbackUrls: this.fallbackUrls,
+      ...(this.portalKeys.length > 0 ? { portalActionKeys: [...this.portalKeys] } : {})
+    };
   }
 
   /** The signed registry, re-signed after each round or change, or when a third of its lifetime has passed. */
@@ -767,6 +787,18 @@ export class CoordinatorRegistryService {
   }
 }
 
+/**
+ * The portal action keys to publish: the public half of PORTAL_ACTION_SIGNING_KEY, then each key in
+ * PORTAL_ACTION_PREVIOUS_VERIFY_KEYS (the old public key while a rotation overlaps). Raw base64.
+ */
+export function portalActionKeysFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  const signing = (env.PORTAL_ACTION_SIGNING_KEY ?? "").trim();
+  if (signing) out.push(publicKeyBase64(parseSigningKey(signing)));
+  for (const k of parseVerifyKeys(env.PORTAL_ACTION_PREVIOUS_VERIFY_KEYS)) out.push(publicKeyBase64(k));
+  return [...new Set(out)];
+}
+
 /** Build the service from REGISTRY_* environment variables. */
 export function registryServiceFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -789,203 +821,11 @@ export function registryServiceFromEnv(
     probationDays: num(env.REGISTRY_PROBATION_DAYS),
     maxMembersPerOperator: num(env.REGISTRY_MAX_MEMBERS_PER_OPERATOR),
     identitySuspendAfterMs: num(env.REGISTRY_IDENTITY_SUSPEND_AFTER_MS),
+    portalActionKeys: portalActionKeysFromEnv(env),
     ...extra
   });
 }
 
-/* ------------------------------------------------------------------ */
-/*  Routes                                                             */
-/* ------------------------------------------------------------------ */
-
-export interface RegistryPasskey {
-  options(user: { userId: string; email?: string }): Promise<{ ok: true; challengeId: string; options: unknown } | { ok: false; status: number; error: string }>;
-  verify(user: { userId: string }, body: unknown): Promise<{ ok: true } | { ok: false; status: number; error: string }>;
-}
-
-export interface RegistryRouteDeps {
-  service: CoordinatorRegistryService;
-  /** Resolves the system admin (owner), or sends 401/403 and resolves null. */
-  requireAdmin: (req: FastifyRequest, reply: FastifyReply) => Promise<{ userId: string; email?: string } | null>;
-  /** The signed-in user, or null. */
-  currentUser: (req: FastifyRequest) => Promise<{ userId: string; email?: string } | null>;
-  /** WebAuthn assertion by the acting user's own passkey (null: passkeys not configured). */
-  passkey: RegistryPasskey | null;
-}
-
-const nodeBody = z.object({ nodeId: z.string().min(1).max(256) });
-
-function send(reply: FastifyReply, r: ServiceResult<Record<string, unknown>>, ok: () => unknown) {
-  if (!r.ok) return reply.code(r.status).send({ error: r.error, ...(r.problems ? { problems: r.problems } : {}) });
-  return reply.send(ok());
-}
-
-function memberView(m: StoredMember) {
-  return {
-    nodeId: m.nodeId,
-    keyFingerprints: m.keyFingerprints,
-    urls: m.urls,
-    region: m.region,
-    operator: { id: m.operatorUserId, name: m.operatorName, kind: m.operatorKind },
-    status: m.status,
-    createdAtMs: m.createdAtMs,
-    admittedAtMs: m.admittedAtMs,
-    probationStartedAtMs: m.probationStartedAtMs,
-    cleanDays: m.cleanDays,
-    suspensionReason: m.suspensionReason,
-    billingEnabled: m.billingEnabled === true
-  };
-}
-
-/**
- *   GET  /network/registry                                 signed registry (public; 503 until the key is set)
- *   GET  /network/registry/public-key                      the registry key's public half and keyId
- *   POST /portal/api/coordinators/registry/apply           operator: apply (key challenge now; pending)
- *   POST /portal/api/coordinators/registry/rotate-key      operator: new key, signed by the current key
- *   GET  /portal/api/coordinators/registry/mine            operator: own members and their status
- *   GET  /admin/network/registry                           owner: every member, health, audit chain check
- *   GET  /admin/network/registry/audit                     owner: the audit trail and its chain check
- *   POST /admin/network/registry/passkey-options           owner: a passkey challenge for one approval
- *   POST /admin/network/registry/approve                   owner: { nodeId, publicKeyFingerprint?, challengeId, response }
- *   POST /admin/network/registry/suspend                   owner: { nodeId, reason }
- *   POST /admin/network/registry/billing                   owner: { nodeId, enabled, challengeId?, response? } (passkey to turn on)
- */
-export function registerRegistryRoutes(app: FastifyInstance, { service, requireAdmin, currentUser, passkey }: RegistryRouteDeps): void {
-  app.get("/network/registry", async (_req, reply) => {
-    const doc = service.signed();
-    if (!doc) return reply.code(503).send({ error: "registry_not_configured" });
-    return reply.header("cache-control", "public, max-age=30").send(doc);
-  });
-
-  app.get("/network/registry/public-key", async (_req, reply) => {
-    const key = service.publicKey();
-    if (!key) return reply.code(503).send({ error: "registry_not_configured" });
-    return reply.send(key);
-  });
-
-  app.post("/portal/api/coordinators/registry/apply", async (req, reply) => {
-    const user = await currentUser(req);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const parsed = applicationSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_application", issues: parsed.error.issues.map((i) => i.path.join(".")) });
-    const r = await service.apply(parsed.data, user.userId);
-    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
-  });
-
-  app.post("/portal/api/coordinators/registry/rotate-key", async (req, reply) => {
-    const user = await currentUser(req);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const parsed = keyRotationSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
-    const r = await service.rotateKey(parsed.data, user.userId);
-    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
-  });
-
-  app.get("/portal/api/coordinators/registry/mine", async (req, reply) => {
-    const user = await currentUser(req);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    await service.load().catch(() => undefined);
-    return reply.send({ maxPerOperator: service.maxMembersPerOperator, members: service.members().filter((m) => m.operatorUserId === user.userId).map(memberView) });
-  });
-
-  app.get("/admin/network/registry", async (req, reply) => {
-    if (!(await requireAdmin(req, reply))) return;
-    await service.load().catch(() => undefined);
-    const { chain } = await service.auditTrail(1);
-    return reply.send({
-      configured: service.configured,
-      maxPerOperator: service.maxMembersPerOperator,
-      auditChain: chain,
-      members: service.members().map((m) => ({ ...memberView(m), contact: m.contact, health: service.memberHealth(m.nodeId)?.health ?? null }))
-    });
-  });
-
-  app.get("/admin/network/registry/audit", async (req, reply) => {
-    if (!(await requireAdmin(req, reply))) return;
-    const q = z.object({ limit: z.coerce.number().int().min(1).max(1000).default(200) }).safeParse(req.query ?? {});
-    return reply.send(await service.auditTrail(q.success ? q.data.limit : 200));
-  });
-
-  app.post("/admin/network/registry/passkey-options", async (req, reply) => {
-    const admin = await requireAdmin(req, reply);
-    if (!admin) return;
-    if (!passkey) return reply.code(503).send({ error: "passkeys_not_configured" });
-    const r = await passkey.options(admin);
-    if (!r.ok) return reply.code(r.status).send({ error: r.error });
-    return reply.send({ challengeId: r.challengeId, options: r.options });
-  });
-
-  app.post("/admin/network/registry/approve", async (req, reply) => {
-    const admin = await requireAdmin(req, reply);
-    if (!admin) return;
-    const body = z
-      .object({
-        nodeId: z.string().min(1).max(256),
-        publicKeyFingerprint: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
-        challengeId: z.string().min(10).max(64).optional(),
-        credentialId: z.string().max(1024).optional(),
-        response: z.unknown().optional()
-      })
-      .safeParse(req.body ?? {});
-    if (!body.success) return reply.code(400).send({ error: "invalid_request" });
-    // The owner's passkey, asserted for this approval (a session step-up is not enough).
-    if (!passkey) return reply.code(503).send({ error: "passkeys_not_configured" });
-    if (!body.data.challengeId || body.data.response === undefined) return reply.code(403).send({ error: "passkey_required", detail: "Confirm the approval with your passkey." });
-    const v = await passkey.verify(admin, { challengeId: body.data.challengeId, credentialId: body.data.credentialId, response: body.data.response });
-    if (!v.ok) return reply.code(v.status).send({ error: v.error });
-    const r = await service.approve(body.data.nodeId, admin.userId, { publicKeyFingerprint: body.data.publicKeyFingerprint });
-    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
-  });
-
-  registerRegistryBillingRoute(app, { service, requireAdmin, passkey, view: memberView });
-
-  app.post("/admin/network/registry/suspend", async (req, reply) => {
-    const admin = await requireAdmin(req, reply);
-    if (!admin) return;
-    const parsed = nodeBody.extend({ reason: z.string().trim().min(1).max(500).default("suspended_by_owner") }).safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
-    const r = await service.suspend(parsed.data.nodeId, admin.userId, parsed.data.reason);
-    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
-  });
-}
-
-/**
- * Portal wiring: the service from REGISTRY_* env and the portal Postgres, the routes (admin =
- * system admin), and the health loop (only when a signing key is set, and not under tests).
- */
-export function registerPortalRegistry(
-  app: FastifyInstance,
-  deps: {
-    requireOpsUser: (req: FastifyRequest, reply: FastifyReply) => Promise<{ user: { userId: string; email?: string }; access: { isSystemAdmin: boolean } } | null>;
-    currentUser: (req: FastifyRequest) => Promise<{ userId: string; email?: string } | null>;
-    store?: RegistryStore;
-    operatorAccount?: (userId: string) => Promise<OperatorAccount>;
-    passkey: RegistryPasskey | null;
-  },
-  env: NodeJS.ProcessEnv = process.env
-): CoordinatorRegistryService {
-  const service = registryServiceFromEnv(env, {
-    log: (msg, extra) => app.log.info({ extra }, msg),
-    store: deps.store,
-    operatorAccount: deps.operatorAccount
-  });
-  registerRegistryRoutes(app, {
-    service,
-    currentUser: deps.currentUser,
-    passkey: deps.passkey,
-    requireAdmin: async (req, reply) => {
-      const principal = await deps.requireOpsUser(req, reply);
-      if (!principal) return null;
-      if (!principal.access.isSystemAdmin) {
-        reply.code(403).send({ error: "system_admin_required" });
-        return null;
-      }
-      return principal.user;
-    }
-  });
-  if (service.configured && !env.VITEST && env.NODE_ENV !== "test") service.start();
-  app.addHook("onClose", async () => service.stop());
-  return service;
-}
 
 /** Fingerprint helper for tooling and tests. */
 export { publicKeyFingerprint };

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { KeyObject } from "node:crypto";
+import { parseVerifyKeys } from "../../security/portal-action.js";
 import { safeTokenEqual } from "../../common/crypto-utils.js";
 import { checkTokenSet, type SharedTokenCheck } from "../../common/env-guard.js";
 import type { TokenSet } from "../../common/token-rotation.js";
@@ -56,6 +57,29 @@ export function portalRequestAudiences(publicUrl: string | undefined, extra: str
   }
   if (set.size === 0) return isProd ? set : null;
   return set;
+}
+
+/**
+ * The portal's verify keys: PORTAL_ACTION_VERIFY_KEYS when set, else the keys the verified signed
+ * registry publishes (`portalActionKeys`, current and previous during a rotation). Re-read on every
+ * call so a registry refresh (rotation) takes effect without a restart; parsing is cached.
+ */
+export function portalVerifyKeySource(configured: readonly KeyObject[], fromRegistry: () => readonly string[]): () => readonly KeyObject[] {
+  let cache: { raw: string; keys: KeyObject[] } = { raw: "", keys: [] };
+  return () => {
+    if (configured.length > 0) return configured;
+    const raw = fromRegistry().join(",");
+    if (raw !== cache.raw) {
+      let keys: KeyObject[] = [];
+      try {
+        keys = parseVerifyKeys(raw);
+      } catch {
+        keys = [];
+      }
+      cache = { raw, keys };
+    }
+    return cache.keys;
+  };
 }
 
 /** Whether portal signatures are checked at all (PORTAL_ACTION_VERIFY_KEYS is set). */

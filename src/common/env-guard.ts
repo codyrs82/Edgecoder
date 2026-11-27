@@ -50,6 +50,15 @@ export function coordinatorRequiredProdEnv(paymentsEnabled: boolean): string[] {
  */
 export const COORDINATOR_PORTAL_INBOUND_ENV = ["PORTAL_ACTION_VERIFY_KEYS", "PORTAL_SERVICE_TOKEN"];
 
+/**
+ * Production check for how the coordinator recognises the portal. With registry keys pinned the
+ * portal's public key comes from the signed registry, so neither variable is needed.
+ */
+export function requireCoordinatorPortalInbound(env: NodeJS.ProcessEnv, registryKeysPinned: boolean): void {
+  if (registryKeysPinned) return;
+  requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV, env);
+}
+
 /** Throws in production when none of `names` is set; no-op elsewhere. */
 export function requireProdEnvOneOf(service: string, names: string[], env: NodeJS.ProcessEnv = process.env): void {
   if (env.NODE_ENV !== "production") return;
