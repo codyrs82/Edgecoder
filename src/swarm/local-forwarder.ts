@@ -75,6 +75,29 @@ export interface LocalForwarderDeps {
   /** The account the coordinator bills for this agent, for /forward/health. */
   agentId: string;
   timeoutMs?: number;
+  /**
+   * A call came in while the agent isn't registered (starting, reconnecting after sleep or a network
+   * change, a coordinator restarting): ask it to register now instead of at its next backoff step.
+   */
+  nudgeRegistration?: () => void;
+  /** How long such a call waits for the registration before answering 503 agent_not_registered (default 8 s). */
+  registrationWaitMs?: number;
+}
+
+/** How often a waiting call looks whether the agent has registered. */
+const REGISTRATION_POLL_MS = 200;
+/** What a 503 agent_not_registered tells the caller to wait before trying again. */
+export const NOT_REGISTERED_RETRY_AFTER_MS = 15_000;
+
+/** The coordinator once the agent has registered, or null when it hasn't within `waitMs`. */
+async function waitForRegistration(deps: LocalForwarderDeps, waitMs: number): Promise<string | null> {
+  deps.nudgeRegistration?.();
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const url = deps.coordinatorUrl();
+    if (url || Date.now() >= deadline) return url;
+    await new Promise((r) => setTimeout(r, Math.min(REGISTRATION_POLL_MS, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -113,7 +136,7 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
         return send(res, 401, { error: "unauthorized" });
       }
       const path = (req.url ?? "/").split("?")[0];
-      const coordinator = deps.coordinatorUrl();
+      let coordinator = deps.coordinatorUrl();
 
       if (req.method === "GET" && path === "/forward/health") {
         return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null, ...(deps.lifecycle ? deps.lifecycle() : {}), ...(deps.serving ? { serving: deps.serving() } : {}) });
@@ -129,7 +152,9 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
         }
         return send(res, 200, { ok: true, ...(await deps.drain(resume)) });
       }
-      if (!coordinator) return send(res, 503, { error: "agent_not_registered" });
+      // Not registered right now: have it register, and give it a few seconds before saying so.
+      if (!coordinator) coordinator = await waitForRegistration(deps, deps.registrationWaitMs ?? 8_000);
+      if (!coordinator) return send(res, 503, { error: "agent_not_registered", retryAfterMs: NOT_REGISTERED_RETRY_AFTER_MS });
 
       const target = req.method === "POST" ? SIGNED_POSTS[path] : undefined;
       if (target) {

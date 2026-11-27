@@ -107,10 +107,42 @@ describe("local forwarder", () => {
     expect((await request(`${fwdUrl}/forward/admin`, { headers: auth })).statusCode).toBe(404);
   });
 
-  it("answers 503 until the agent has registered", async () => {
-    registered = null;
-    const res = await request(`${fwdUrl}/forward/submit`, { method: "POST", headers: auth, body: "{}" });
+  it("answers 503 until the agent has registered, after asking it to register and waiting a little", async () => {
+    let nudges = 0;
+    const waiting = createLocalForwarder({
+      token: () => "secret-token",
+      coordinatorUrl: () => null,
+      meshHeaders: () => ({}),
+      signedHeaders: () => ({}),
+      agentId: "mac-1",
+      nudgeRegistration: () => nudges++,
+      registrationWaitMs: 50,
+    });
+    const url = await listen(waiting);
+    const res = await request(`${url}/forward/submit`, { method: "POST", headers: auth, body: "{}" });
     expect(res.statusCode).toBe(503);
+    expect(await res.body.json()).toEqual({ error: "agent_not_registered", retryAfterMs: 15_000 });
+    expect(nudges).toBe(1);
     expect(seen).toHaveLength(0);
+    waiting.close();
+  });
+
+  it("a call that comes in while the agent is reconnecting goes through once it has registered", async () => {
+    let now: string | null = null;
+    const reconnecting = createLocalForwarder({
+      token: () => "secret-token",
+      coordinatorUrl: () => now,
+      meshHeaders: () => ({}),
+      signedHeaders: () => ({ "x-agent-id": "mac-1" }),
+      agentId: "mac-1",
+      // Registering takes a moment after the nudge.
+      nudgeRegistration: () => void setTimeout(() => (now = coordUrl), 100),
+      registrationWaitMs: 5_000,
+    });
+    const url = await listen(reconnecting);
+    const res = await request(`${url}/forward/submit`, { method: "POST", headers: auth, body: JSON.stringify({ taskId: "t1" }) });
+    expect(res.statusCode).toBe(200);
+    expect(seen.map((x) => x.url)).toEqual(["/submit"]);
+    reconnecting.close();
   });
 });

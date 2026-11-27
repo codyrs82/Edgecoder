@@ -25,6 +25,7 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
         case "paused": return { text: "Paused", tone: "muted" };
         case "over_budget": return { text: "Budget spent", tone: "warn" };
         case "needs_folder": return { text: "Needs folder", tone: "warn" };
+        case "waiting_network": return { text: "Waiting for the network", tone: "muted" };
         default: return { text: "Idle", tone: "muted" };
       }
     }
@@ -60,6 +61,7 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
       if (b.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
       if (b.status === "needs_folder") return { text: "Needs folder · set it up in the EdgeCoder app on " + ((b.machine && b.machine.machineName) || "your machine"), tone: "warn" };
       if (!b.enabled) return { text: "Paused", tone: "muted" };
+      if (b.status === "waiting_network") return { text: "Waiting for the network · retrying automatically", tone: "muted" };
       if (b.status === "over_budget" || b.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
       if (b.held === "run_cap") return { text: "Daily limit of " + (b.maxRunsPerDay || 48) + " runs reached · resumes tomorrow", tone: "warn" };
       var failed = b.status === "error" ? "Last run failed · " : "", tone = b.status === "error" ? "err" : "muted", n = b.nextRun;

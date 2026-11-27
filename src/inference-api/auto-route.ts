@@ -442,7 +442,9 @@ export function routeLabel(r: Route): string {
  * - network_only: always the network (paid, within the budget), never this computer, your machines
  *   or a reservation, and no free fallback: with no cSats left it stops (noRouteMessage). Limited to
  *   one class when PlanOptions.computeClass is set; the model is the network's best fit, or
- *   PlanOptions.model when one is chosen.
+ *   PlanOptions.model when one is chosen. A preference, not a wall: while the network can't be
+ *   reached (this computer's agent not connected, a coordinator restarting, every machine busy) a
+ *   call runs on this computer's models instead (backends.ts autoBackend, NETWORK_FAILOVER_WHY).
  */
 export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model" | "network_only";
 export const COMPUTE_POLICIES: readonly ComputePolicy[] = ["local_first", "auto", "local_only", "mine_only", "model", "network_only"];

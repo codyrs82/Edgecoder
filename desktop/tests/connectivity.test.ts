@@ -189,15 +189,18 @@ describe("bots while offline", () => {
 });
 
 describe("reconnect", () => {
-  it("shows a short Back online toast (about 3 s), resumes paused bots and refreshes", async () => {
+  it("going offline pauses nothing (a Network only bot runs on this computer or retries by itself); back online resumes bots an older version paused", async () => {
     vi.useRealTimers();
     const notify = vi.fn();
     const update = vi.fn(async () => undefined);
     const refresh = vi.fn(async () => []);
-    const h = connectivityHandlers({ notify, bots: () => [bot("net", { policy: "network_only" })], update, refresh, store: memStore() });
+    const store = memStore();
+    const h = connectivityHandlers({ notify, bots: () => [bot("net", { policy: "network_only" })], update, refresh, store });
     await h.onOffline();
-    expect(update).toHaveBeenCalledWith("net", { enabled: false });
+    expect(update).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
+    // Paused by an older version while offline.
+    store.setItem(OFFLINE_PAUSED_KEY, JSON.stringify(["net"]));
     await h.onOnline();
     expect(notify).toHaveBeenCalledWith(BACK_ONLINE_TEXT, "success", "back-online", BACK_ONLINE_TOAST_MS);
     expect(BACK_ONLINE_TOAST_MS).toBe(3_000);

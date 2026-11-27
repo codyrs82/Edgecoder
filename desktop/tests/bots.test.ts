@@ -26,6 +26,24 @@ describe("bot header helpers", () => {
     expect(autoStatus(bot({ status: "paused", enabled: false })).text).toBe("Paused");
   });
 
+  it("a bot that can't reach the network says it is waiting and retrying by itself, never stuck or failed", () => {
+    const now = 1_000_000;
+    const lastRun = { id: "r1", trigger: "start", startedAtMs: 1, endedAtMs: 2, status: "failed", summary: "Failed: x", error: "This computer's agent isn't connected to the network right now (it is starting or reconnecting).", cSats: 0 } as Bot["lastRun"];
+    const b = bot({ status: "waiting_network", enabled: true, lastRun, nextRun: { kind: "start", atMs: now + 5 * 60_000 } });
+    expect(statusChip(b)).toEqual({ text: "Waiting for the network", tone: "muted" });
+    expect(autoStatus(b, now)).toEqual({ text: "Waiting for the network · retrying automatically in 5 min", tone: "muted" });
+    expect(autoStatus({ ...b, nextRun: { kind: "start", atMs: now + 10_000 } }, now).text).toBe("Waiting for the network · retrying automatically");
+    expect(botStatusLine(b, now)).toBe("Waiting for the network · retrying automatically");
+    expect(failureNotice(b)).toBeNull();
+  });
+
+  it("an offline failure is an informational note with no Switch to This computer button (the switch happens by itself)", () => {
+    const lastRun = { id: "r2", trigger: "message", startedAtMs: 1, endedAtMs: 2, status: "failed", summary: "Failed: x", error: "This computer's agent isn't connected to the network yet.", cSats: 0 } as Bot["lastRun"];
+    const n = failureNotice(bot({ status: "error", lastRun, compute: { policy: "network_only" } }));
+    expect(n).toMatchObject({ kind: "offline", title: "Waiting for the network", info: true, actions: ["edit"] });
+    expect(n!.detail).toMatch(/uses this computer's models meanwhile/);
+  });
+
   it("turns a cSats failure into a plain notice with actions", () => {
     const error = "Not enough cSats for this request (it sets aside up to 91.8 cSats; unused cSats come back).";
     const failed = bot({ status: "error", lastRun: { id: "run_9", trigger: "schedule", startedAtMs: 0, status: "failed", summary: `Failed: ${error}`, cSats: 0, error } });

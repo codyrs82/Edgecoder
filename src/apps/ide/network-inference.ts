@@ -374,7 +374,8 @@ async function* streamSubmitted(
   if (req.drainFailover && isDrainingAnswer(sub)) throw new CoordinatorDrainingError(drainRetryAfterSec(), typeof sub.json.coordinatorUrl === "string" ? sub.json.coordinatorUrl : undefined);
   if (req.routeRedirect && isDrainingAnswer(sub) && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
   if (sub.status !== 200) {
-    const err = String(sub.json.error ?? `HTTP ${sub.status}`);
+    // The coordinator holds no key for this agent (it restarted, or the agent moved): the agent registers again by itself.
+    const err = sub.json.error === "mesh_unauthorized" && sub.json.reason === "agent_not_registered" ? "agent_not_registered" : String(sub.json.error ?? `HTTP ${sub.status}`);
     // A named model with no free slot there, free on a peer (#526): resubmit there (the caller decides).
     if (req.model !== "auto" && req.routeRedirect && err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
     if (req.model === "auto") {
@@ -398,7 +399,8 @@ async function* streamSubmitted(
       err === "reserved_agent_lacks_model" ? `The reserved machine doesn't have ${req.model}; it has: ${((sub.json.models as string[]) ?? []).join(", ") || "no models"}.` :
       err === "insufficient_credits"
         ? typeof sub.json.message === "string" && sub.json.message.startsWith("Not enough cSats") ? sub.json.message.slice(0, 300) : `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :
-      err === "agent_not_registered" ? "This computer's agent isn't connected to the network yet." :
+      // The local forwarder already asked the agent to register and waited a few seconds (local-forwarder.ts).
+      err === "agent_not_registered" ? "This computer's agent isn't connected to the network right now (it is starting or reconnecting). Nothing was charged; try again shortly." :
       err === "coordinator_draining" ? "The coordinator is restarting for an update. Nothing was charged; try again in a few seconds." :
       `Network request failed: ${err}`;
     // 404 (reservation_not_active) stays a 404: as a 502 the edge (Cloudflare) swaps the body for its

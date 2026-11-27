@@ -12,6 +12,17 @@ import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, cheapestNetworkEstimate
 import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from "./job-complexity.js";
 import { ChatBackendError, DEADLINE_ERROR, DEADLINE_ERROR_CODE, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
+import { runFailureClass } from "../common/run-failures.js";
+
+/** Said on a call Network only ran on this computer because the network couldn't be reached. */
+export const NETWORK_FAILOVER_WHY = "ran on this computer while the network was unavailable";
+
+/** The network couldn't be reached right now (not connected, reconnecting, restarting, busy, the connection dropped). */
+export function networkUnreachableError(err: unknown): boolean {
+  if (err instanceof ChatBackendError && (err.status === 402 || err.info?.code === "not_enough_csats" || err.info?.code === "insufficient_credits")) return false;
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return runFailureClass(message) === "transient";
+}
 
 /** "This computer (Apple M1 Max)": a call that ran on this machine's Ollama. */
 export function thisComputer(t: { promptMs?: number; genMs?: number; promptTokens?: number; outputTokens?: number } = {}): ServedBy {
@@ -300,7 +311,39 @@ export function autoBackend(opts: {
     const skip = new Set(planOpts.exclude ?? []);
     const kept = skip.size ? all.filter((r) => !skip.has(routeModelId(r))) : all;
     const routes = kept.length ? kept : all;
-    if (!routes.length) throw noRouteError(noRouteMessage(policy, inputs, planOpts, workload), planOpts.computeClass);
+    /*
+     * Network only is a preference, not a wall: when the network can't be reached right now (this
+     * computer's agent not connected or reconnecting, a coordinator restarting, every machine busy),
+     * the call runs on this computer's own models instead, said on the call (NETWORK_FAILOVER_WHY).
+     * The next call tries the network first again, so it goes back by itself once the network is back.
+     * Not for money: out of cSats or over the budget stays a stop.
+     */
+    const localFailover = policy === "network_only" ? planRoutes(workload, inputs, "local_only", {}).map((r) => ({ ...r, complexity: complexity.level, why: NETWORK_FAILOVER_WHY })) : [];
+    async function* runLocalFailover(cause: unknown): AsyncGenerator<ChatPiece> {
+      for (const r of localFailover) {
+        const it = opts.run(r)(req, signal);
+        let first: IteratorResult<ChatPiece>;
+        try {
+          first = await it.next();
+        } catch {
+          continue;
+        }
+        opts.onRoute?.(r);
+        for (let n = first; !n.done; n = await it.next()) {
+          yield "done" in n.value ? { ...n.value, where: `${r.reason} (${NETWORK_FAILOVER_WHY})` } : n.value;
+        }
+        return;
+      }
+      throw cause;
+    }
+    if (!routes.length) {
+      const err = noRouteError(noRouteMessage(policy, inputs, planOpts, workload), planOpts.computeClass);
+      if (localFailover.length && networkUnreachableError(err)) {
+        yield* runLocalFailover(err);
+        return;
+      }
+      throw err;
+    }
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
@@ -335,6 +378,11 @@ export function autoBackend(opts: {
         const where = r.bestFit && n.value.where ? n.value.where : r.reason;
         yield { ...n.value, where: r.why ? `${where} (${r.why})` : where };
       }
+      return;
+    }
+    // Every network route failed only because the network couldn't be reached: this computer takes it.
+    if (localFailover.length && errs.length && errs.every(networkUnreachableError)) {
+      yield* runLocalFailover(lastErr);
       return;
     }
     // One clear failure instead of the last route's: a class with no machine, else money.

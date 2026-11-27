@@ -436,7 +436,7 @@
   {/if}
 
   {#if view === "chat" && notice}
-    <div class="notice" role="status" data-testid="bot-failure-notice">
+    <div class="notice" class:info={notice.info} role="status" data-testid="bot-failure-notice">
       <CircleAlert size={15} />
       <div class="notice-text">
         <div class="notice-title">{notice.title}</div>
@@ -1438,6 +1438,12 @@
     background: color-mix(in srgb, var(--danger) 7%, var(--bg-surface));
     color: var(--danger);
     font-size: 12.5px;
+  }
+  /* Informational (it resolves by itself): a note, not an error. */
+  .notice.info {
+    border-color: var(--border);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
   }
   .notice-text {
     flex: 1;

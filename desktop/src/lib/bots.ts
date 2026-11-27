@@ -6,7 +6,7 @@ import type { IdeStreamEvent } from "./api";
 import { formatUsd, frontierName } from "./compute-choice";
 import { hardwareShort, type Served } from "./served";
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error" | "needs_folder";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "waiting_network" | "error" | "needs_folder";
 
 /** A bot made on the web that waits for this computer to choose its folder (the server's BotSetup). */
 export interface BotSetup {
@@ -403,6 +403,11 @@ export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "he
   if (!bot.enabled && bot.stuck) return { text: "Paused · stuck", tone: "muted" };
   if (!bot.enabled) return { text: "Paused", tone: "muted" };
   if (bot.status === "out_of_csats") return { text: "Paused · resumes after top-up", tone: "muted" };
+  // The network was out of reach: it tries again by itself (src/apps/ide/bots.ts retryUnavailable).
+  if (bot.status === "waiting_network") {
+    const at = bot.nextRun?.atMs;
+    return { text: at && at > now + 30_000 ? `Waiting for the network · retrying automatically in ${untilText(at, now)}` : "Waiting for the network · retrying automatically", tone: "muted" };
+  }
   if (bot.status === "over_budget" || bot.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
   if (bot.held === "run_cap") return { text: `Daily limit of ${bot.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY} runs reached · resumes tomorrow`, tone: "warn" };
   const n = bot.nextRun;
@@ -455,6 +460,8 @@ export function statusChip(bot: Pick<Bot, "status"> & Partial<Pick<Bot, "stuck">
       return { text: "Budget spent", tone: "warn" };
     case "out_of_csats":
       return { text: "Out of cSats", tone: "warn" };
+    case "waiting_network":
+      return { text: "Waiting for the network", tone: "muted" };
     case "needs_folder":
       return { text: "Needs folder", tone: "warn" };
     default:
@@ -477,6 +484,8 @@ export interface FailureNotice {
   detail: string;
   /** The first is the primary (highlighted) action. */
   actions: NoticeAction[];
+  /** Informational (nothing to fix: it resolves by itself), shown as a note rather than an error. */
+  info?: boolean;
 }
 
 /**
@@ -488,6 +497,8 @@ export function failureNotice(bot: Pick<Bot, "name" | "lastRun" | "compute"> & P
   if (bot.stuck && bot.enabled === false) {
     return { runId: `stuck-${bot.stuck.atMs}`, kind: "stuck", title: "Stuck", detail: stuckText(bot.name, bot.stuck), actions: ["edit"] };
   }
+  // Retrying by itself: nothing for you to do, the header says so.
+  if (bot.status === "waiting_network") return null;
   const r = bot.lastRun;
   if (!r || r.status !== "failed") return null;
   const err = (r.error ?? r.summary ?? "").replace(/^Failed:\s*/, "").replace(/^Error contacting model:\s*/, "").trim();
@@ -507,7 +518,9 @@ export function failureNotice(bot: Pick<Bot, "name" | "lastRun" | "compute"> & P
       return { ...base, title: cls ? `No ${cls} machines online` : "No machines online", detail: err.replace(/^No .+? machines? online[^.]*\.\s*/, "") || err, actions: ["edit"] };
     }
     case "offline":
-      return { ...base, title: "Offline", detail: err, actions: onlyHere ? ["edit"] : ["local_only", "edit"] };
+      // Not an error to act on: a Network only bot runs on this computer's models meanwhile (when it
+      // has one) and goes back to the network by itself; without one it waits and retries.
+      return { ...base, title: "Waiting for the network", detail: onlyHere ? err : `${err} It uses this computer's models meanwhile when it has one, and goes back to the network by itself.`, actions: ["edit"], info: true };
     case "model":
       return { ...base, title: "No model available", detail: err, actions: ["edit"] };
     default:
@@ -592,6 +605,8 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
       return "Budget spent";
     case "out_of_csats":
       return "Out of cSats";
+    case "waiting_network":
+      return "Waiting for the network · retrying automatically";
     case "needs_folder":
       return "Needs folder: made on the web";
     case "paused":

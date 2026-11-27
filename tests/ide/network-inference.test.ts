@@ -139,6 +139,14 @@ describe("streamNetworkCompletion", () => {
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);
   });
 
+  it("this computer's agent not registered (at the forwarder, or a coordinator that holds no key for it) says it is reconnecting", async () => {
+    for (const answer of [{ status: 503, json: { error: "agent_not_registered", retryAfterMs: 15_000 } }, { status: 401, json: { error: "mesh_unauthorized", reason: "agent_not_registered" } }]) {
+      const deps = await fakeForwarder(() => answer);
+      await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/agent isn't connected to the network right now \(it is starting or reconnecting\)/);
+      server?.close();
+    }
+  });
+
   it("says when your machine has the model but keeps it off the network and its agent can't run it for you", async () => {
     const deps = await fakeForwarder(() => ({ status: 409, json: { error: "no_own_agent_has_model", reason: "local_only", localOnlyOn: ["nvidia-1-gpu"] } }));
     const err = await streamNetworkCompletion(deps, { model: "qwen3.5:9b", computeClass: "any", target: "mine", messages: [{ role: "user", content: "hi" }] }).next().catch((e: Error) => e);
