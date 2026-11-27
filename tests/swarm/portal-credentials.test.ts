@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkPortalInboundToken, portalOutboundHeaders } from "../../src/swarm/coordinator/portal-credentials.js";
+import { checkPortalInboundToken, portalOutboundHeaders, portalOwnerKnown } from "../../src/swarm/coordinator/portal-credentials.js";
 import { tokenSet } from "../../src/common/token-rotation.js";
 import { bootstrapRegisterLogLevel } from "../../src/mesh/peer-trust.js";
 
@@ -43,5 +43,13 @@ describe("mesh_bootstrap_registered log level", () => {
     expect(bootstrapRegisterLogLevel(401)).toBe("warn");
     expect(bootstrapRegisterLogLevel(403)).toBe("warn");
     expect(bootstrapRegisterLogLevel(500)).toBe("warn");
+  });
+});
+
+describe("portal-validated owner", () => {
+  it("counts the owner's user id when the portal withholds the email", () => {
+    expect(portalOwnerKnown({ ownerEmail: "a@x.io" })).toBe(true);
+    expect(portalOwnerKnown({ ownerUserId: "user-1" })).toBe(true);
+    expect(portalOwnerKnown({})).toBe(false);
   });
 });

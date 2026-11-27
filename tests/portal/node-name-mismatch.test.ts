@@ -31,8 +31,8 @@ async function internalApp() {
   return app;
 }
 
-const validate = (app: any, body: Record<string, unknown>) =>
-  app.inject({ method: "POST", url: "/internal/nodes/validate", headers: { "content-type": "application/json", "x-portal-service-token": "coord" }, payload: body });
+const validate = (app: any, body: Record<string, unknown>, token = "svc") =>
+  app.inject({ method: "POST", url: "/internal/nodes/validate", headers: { "content-type": "application/json", "x-portal-service-token": token }, payload: body });
 
 describe("portal /internal/nodes/validate names the token's own node on node_not_enrolled", () => {
   it("a token enrolled as another name: tokenNode is that enrolment", async () => {
@@ -40,6 +40,9 @@ describe("portal /internal/nodes/validate names the token's own node on node_not
     const res = await validate(app, { nodeId: "nvidia-1-gpu", nodeKind: "agent", registrationToken: "tok-patrick" });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({ allowed: false, reason: "node_not_enrolled", tokenNode: { nodeId: "RTXA2000-Laptop", ownerEmail: "patrick@example.com" } });
+    // The shared coordinator token gets the node id only, never the owner's email.
+    const coord = await validate(app, { nodeId: "nvidia-1-gpu", nodeKind: "agent", registrationToken: "tok-patrick" }, "coord");
+    expect(coord.json()).toEqual({ allowed: false, reason: "node_not_enrolled", tokenNode: { nodeId: "RTXA2000-Laptop" } });
   });
 
   it("an unknown token, or one for another node kind, names nobody", async () => {

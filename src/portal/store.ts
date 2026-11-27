@@ -1827,11 +1827,17 @@ export class PortalStore {
   async listPendingNodes(options?: {
     nodeKind?: "agent" | "coordinator";
     ownerUserId?: string;
+    /** Only nodes this coordinator (enrolled node id) last validated. */
+    validatedByCoordinator?: string;
     limit?: number;
   }): Promise<NodeEnrollment[]> {
     const limit = Math.max(1, Math.min(500, options?.limit ?? 200));
     const args: Array<string | number> = [limit];
     let where = "WHERE node_approved = FALSE";
+    if (options?.validatedByCoordinator) {
+      args.push(options.validatedByCoordinator);
+      where += ` AND last_validated_by_coordinator = $${args.length}`;
+    }
     if (options?.nodeKind) {
       args.push(options.nodeKind);
       where += ` AND node_kind = $${args.length}`;
