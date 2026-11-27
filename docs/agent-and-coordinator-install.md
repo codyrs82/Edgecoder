@@ -169,23 +169,59 @@ Use this for horizontal scale or regional redundancy.
 
 ### 1) Enroll coordinator node in portal
 
-- Sign in to portal
-- Enroll node with `nodeKind=coordinator`
+- Sign in to portal (or use a portal API key: `POST /nodes/enroll` with `Authorization: Bearer <api-key>`)
+- Enroll node with `nodeKind=coordinator` and a node ID of your choice
 - Capture returned `registrationToken`
+- Run the coordinator with `COORDINATOR_PEER_ID` set to that node ID. The mesh looks the coordinator up
+  in the portal by its peer ID, and the default peer ID (derived from `COORDINATOR_PUBLIC_URL`) does not
+  match the enrolled node ID.
 
 ### 2) Deploy coordinator runtime
 
 If using Fly, create a new coordinator app and deploy the same build. Any node in the gossip mesh can act as a coordinator — there is no fixed "coordinator-2" role.
 
-Minimum runtime env:
+```bash
+fly apps create <your-app> --org <your-org>
+fly postgres create --name <your-app>-db --org <your-org> --region <region> --initial-cluster-size 1 --flex
+fly postgres attach <your-app>-db -a <your-app>     # sets DATABASE_URL (the output shows the password)
+```
+
+Keep your `fly.toml` outside the repository if you like, but `[build] dockerfile` is resolved relative
+to the directory of the `fly.toml`, so point it into your checkout (`<checkout>/deploy/docker/Dockerfile.agent`
+as a relative path). Use `deploy/fly/fly.seed-node.toml` as the template for a coordinator without a
+local model (`SKIP_OLLAMA=true`, `DISABLE_SELF_AGENT=1`). Do not run agents as extra machines in the
+coordinator's app: every machine in a Fly app receives the app's secrets.
+
+A production coordinator (`NODE_ENV=production`) refuses to start unless all of these are set
+(`src/common/env-guard.ts`):
 
 ```dotenv
-MESH_AUTH_TOKEN=<mesh-token>
-COORDINATOR_PUBLIC_URL=https://<your-coordinator>.fly.dev
-CONTROL_PLANE_URL=https://<your-coordinator>
-COORDINATOR_BOOTSTRAP_URLS=https://<your-coordinator>
-COORDINATOR_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
+# your own values
+DATABASE_URL=<your Postgres>
+ADMIN_API_TOKEN=<random>
+PAYMENT_WEBHOOK_SECRET=<random>
+COORDINATOR_PRIVATE_KEY_PEM=<your Ed25519 PKCS#8 key; keep it stable>
+# from the network you join
+MESH_AUTH_TOKEN=<mesh token of the network>
+PORTAL_SERVICE_URL=<your-portal>
+PORTAL_SERVICE_TOKEN=<token the portal operator issues for coordinators (PORTAL_COORDINATOR_TOKEN on the portal)>
 ```
+
+Plus the join settings:
+
+```dotenv
+COORDINATOR_PUBLIC_URL=https://<your-coordinator>.fly.dev
+COORDINATOR_PEER_ID=<enrolled node ID>
+COORDINATOR_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
+COORDINATOR_BOOTSTRAP_URLS=<existing coordinators, comma separated>
+MESH_PEER_ALLOWLIST=<peerId:fingerprint@url of each existing coordinator>
+ECONOMY_PAYMENTS_ENABLED=false   # until you run your own Lightning node (LIGHTNING_PROVIDER=lnd|cln)
+```
+
+`MESH_PEER_ALLOWLIST` entries are the `trustEntry` that each existing coordinator's public `GET /identity`
+reports, followed by `@<its URL>`. Send your own `trustEntry` (from your coordinator's `GET /identity`
+after the first start) to the mesh operator: every existing coordinator must add it to its own
+`MESH_PEER_ALLOWLIST` and restart before peering works (see [public-mesh-operations](public-mesh-operations.md)).
 
 Recommended:
 
@@ -219,15 +255,31 @@ sudo systemctl restart io.edgecoder.coordinator.service
 ### 3) Approval
 
 The coordinator stays inactive until an operator of the mesh approves it through the control-plane
-admin API, as for agents.
+admin API, as for agents: `POST /coordinators/<node ID>/approval` with `{"approved": true}` and the
+approving coordinator's `ADMIN_API_TOKEN`. In the all-in-one runtime the control plane listens on port
+4303 on localhost only, so on Fly the call is made from inside that coordinator's machine (`fly ssh console`).
+
+### Current limits for coordinators run by other operators
+
+- Peering needs the network's shared `MESH_AUTH_TOKEN`: `/mesh/register-peer` and `/mesh/ingest` check it
+  before anything else, so the portal registration token alone does not admit a coordinator.
+- Credits live in each coordinator's own database. A coordinator with its own `DATABASE_URL` does not see
+  balances held on the network's ledger, so a network-billed call it starts itself is refused with
+  `insufficient_credits`. Calls a user runs on their own machines (`target: "mine"`) are not billed and work.
+- `PORTAL_COORDINATOR_TOKEN` is a single value on the portal, shared by every outside coordinator.
 
 ### 4) Verify mesh joining
 
-Check the discovery feed:
+Check the discovery feed. It is served by the control plane (port 4303, localhost only in the
+all-in-one runtime); on the public port it needs the mesh token like the other coordinator routes:
 
 ```bash
-curl -s https://<your-coordinator>/network/coordinators
+curl -s http://127.0.0.1:4303/network/coordinators          # from inside the coordinator host
 ```
+
+Check that each existing coordinator's public `GET /identity` matches the entries in your
+`MESH_PEER_ALLOWLIST`, and that your coordinator's log shows `mesh_bootstrap_registered` with
+`registerStatus` 200 (401 means the mesh token or the peer's allowlist does not accept you yet).
 
 Check peer view from an existing coordinator (mesh token required):
 
