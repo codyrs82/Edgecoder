@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ACCEPT, attachmentLabel, attachmentsText, chipLabel, classify, scanZip, visionFor, visionNote } from "../src/lib/attachments";
 import { makeZip } from "../../tests/helpers/make-zip";
 import { botPlacement } from "../src/lib/bots";
+import { hardwareShort, servedLine, type Served } from "../src/lib/served";
 import type { IdeStreamEvent } from "../src/lib/api";
 
 describe("attachments", () => {
@@ -90,6 +91,13 @@ describe("botPlacement: where a bot's step runs", () => {
     expect(botPlacement([usage({ ...base, label: "your machine (Mac)", own: true, computeClass: "apple", hardware: "Apple Silicon" }, "mine/qwen3-coder:30b")])).toBe("Your machine (Mac) · Apple Silicon · qwen3-coder:30b · free");
     expect(botPlacement([usage({ ...base, label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", hardware: "Datacenter GPU (gpu.dc40)", gpu: "2× NVIDIA A16" }, "network/qwen3-coder:30b@gpu.dc")], 3.4)).toBe("Network · Datacenter GPU 2×A16 · qwen3-coder:30b · 3.4 cSats");
     expect(botPlacement([usage({ ...base, label: "Anthropic", own: true, computeClass: "frontier", hardware: "Anthropic · your key" }, "frontier/anthropic/claude-opus-5-5")])).toBe("Claude Opus 5.5 · your key");
+  });
+
+  it("over Bluetooth while the network was out of reach: the device, free, and why", () => {
+    const served = { ...base, label: "Over Bluetooth: My iPhone", own: false, computeClass: "bluetooth", hardware: "Over Bluetooth: My iPhone" };
+    expect(botPlacement([usage(served, "qwen2.5-coder:7b")], 0)).toBe("Over Bluetooth: My iPhone · qwen2.5-coder:7b · free · network unavailable");
+    expect(hardwareShort(served as unknown as Served)).toBe("Over Bluetooth: My iPhone");
+    expect(servedLine([{ cSats: 0, model: "qwen2.5-coder:7b", served: served as unknown as Served }] as never)).toBe("qwen2.5-coder:7b · Over Bluetooth: My iPhone · free");
   });
 
   it("nothing yet: null", () => {

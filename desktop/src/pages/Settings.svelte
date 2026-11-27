@@ -1,6 +1,6 @@
 <script lang="ts">
   import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
-  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, getCliStatus, installCliTool, type CliStatus, type ProjectsFolder } from "../lib/api";
+  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, getCliStatus, installCliTool, getBleOfflineSetting, setBleOfflineSetting, listBleNearby, type CliStatus, type ProjectsFolder, type BleOfflineSetting, type BleNearbyDevice } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, autoUpdateEnabled, type UpdateStatus } from "../lib/updater";
@@ -139,6 +139,47 @@
     } finally {
       bleSaving = false;
     }
+  }
+
+  // "Use my nearby devices over Bluetooth when offline" (src/mesh/ble/ble-offline-consent.ts): on by
+  // default, but only devices allowed here are ever sent a bot's prompt. Applies at once.
+  let bleOffline = $state<BleOfflineSetting>({ enabled: true, devices: [] });
+  let bleNearby = $state<BleNearbyDevice[]>([]);
+  let bleOfflineNote = $state("");
+  let bleOfflineSaving = $state(false);
+  $effect(() => {
+    getBleOfflineSetting().then((s) => (bleOffline = s)).catch(() => {});
+    void refreshBleNearby();
+  });
+  async function refreshBleNearby() {
+    try {
+      const r = await listBleNearby();
+      bleNearby = r.peers.filter((p) => !p.allowed);
+      if (!r.available) bleOfflineNote = "Nearby devices show here while this computer's agent runs with Bluetooth on.";
+    } catch {
+      bleNearby = [];
+    }
+  }
+  async function saveBleOffline(next: BleOfflineSetting) {
+    const before = bleOffline;
+    bleOffline = next;
+    bleOfflineSaving = true;
+    bleOfflineNote = "";
+    try {
+      bleOffline = await setBleOfflineSetting(next);
+      await refreshBleNearby();
+    } catch (e) {
+      bleOffline = before;
+      bleOfflineNote = `Couldn't save: ${(e as Error).message ?? e}`;
+    } finally {
+      bleOfflineSaving = false;
+    }
+  }
+  /** The name typed for each nearby device before allowing it (shown as "Over Bluetooth: <name>"). */
+  let bleNameDraft = $state<Record<string, string>>({});
+  function allowBleDevice(d: BleNearbyDevice) {
+    const name = (bleNameDraft[d.agentId] ?? "").trim() || d.name;
+    void saveBleOffline({ ...bleOffline, devices: [...bleOffline.devices, { agentId: d.agentId, name }] });
   }
 
   // Code from your phone (src/common/code-relay.ts): the app keeps the choice and restarts its agent
@@ -540,6 +581,33 @@
         </div>
         <div class="sp-controls">
           <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable Bluetooth mesh" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Use my nearby devices over Bluetooth when offline</span>
+          <span class="sp-desc" data-testid="ble-offline-description">
+            When a bot on Network only can't reach the network and this computer can't run the call, one of the devices you allow below runs it over Bluetooth, free, and the bot goes back to the network once it's reachable. Only devices you allow here are ever sent a prompt. The prompt goes as plain text (no tools), unencrypted, and an iPhone answers only while it's charging.
+          </span>
+          {#if bleOffline.devices.length}
+            <span class="sp-desc">Allowed:</span>
+            {#each bleOffline.devices as d (d.agentId)}
+              <span class="sp-desc">{d.name} <code>{d.agentId}</code> <button class="link-inline" disabled={bleOfflineSaving} onclick={() => void saveBleOffline({ ...bleOffline, devices: bleOffline.devices.filter((x) => x.agentId !== d.agentId) })}>Remove</button></span>
+            {/each}
+          {:else}
+            <span class="sp-desc">No device allowed yet, so nothing is sent over Bluetooth.</span>
+          {/if}
+          {#if bleNearby.length}
+            <span class="sp-desc">Nearby now:</span>
+            {#each bleNearby as d (d.agentId)}
+              <span class="sp-desc">{d.name} · {d.model || "no model"} · {d.deviceType} <input type="text" placeholder="Name (e.g. My iPhone)" aria-label={`Name for ${d.name}`} maxlength="60" bind:value={bleNameDraft[d.agentId]} /> <button class="link-inline" disabled={bleOfflineSaving} onclick={() => allowBleDevice(d)}>Allow</button></span>
+            {/each}
+          {/if}
+          <span class="sp-desc"><button class="link-inline" onclick={() => void refreshBleNearby()}>Look for nearby devices</button></span>
+          {#if bleOfflineNote}<span class="sp-desc" role="status">{bleOfflineNote}</span>{/if}
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={bleOffline.enabled} aria-label="Use my nearby devices over Bluetooth when offline" disabled={bleOfflineSaving} onclick={() => void saveBleOffline({ ...bleOffline, enabled: !bleOffline.enabled })}></button>
         </div>
       </div>
       <div class="sp-row">

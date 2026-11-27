@@ -13,6 +13,7 @@ import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from 
 import { ChatBackendError, DEADLINE_ERROR, DEADLINE_ERROR_CODE, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
 import { runFailureClass } from "../common/run-failures.js";
+import { BLUETOOTH_FAILOVER_WHY, bluetoothBackend, bluetoothCandidates, type BluetoothLink } from "./bluetooth-failover.js";
 
 /** Said on a call Network only ran on this computer because the network couldn't be reached. */
 export const NETWORK_FAILOVER_WHY = "ran on this computer while the network was unavailable";
@@ -279,6 +280,12 @@ export function autoBackend(opts: {
    * many clients share: only requests with a session id are remembered).
    */
   hysteresis?: "backend" | "session";
+  /**
+   * Network only, network out of reach and this computer can't take the call: nearby devices the
+   * user allowed run it over Bluetooth (bluetooth-failover.ts) before the call fails for the
+   * caller's retry.
+   */
+  bluetooth?: BluetoothLink;
 }): ChatBackend {
   const windows = new Map<string, ComplexityWindow>();
   const windowFor = (key: string) => {
@@ -317,7 +324,12 @@ export function autoBackend(opts: {
      * the call runs on this computer's own models instead, said on the call (NETWORK_FAILOVER_WHY).
      * The next call tries the network first again, so it goes back by itself once the network is back.
      * Not for money: out of cSats or over the budget stays a stop.
+     *
+     * When this computer can't take it either (Ollama not running, no model, the run failed), a
+     * nearby device the user allowed runs it over Bluetooth (BLUETOOTH_FAILOVER_WHY), free. Only then
+     * does the call fail with the network's error, for the caller's retry (bots.ts retryUnavailable).
      */
+    const failover = policy === "network_only";
     const localFailover = policy === "network_only" ? planRoutes(workload, inputs, "local_only", {}).map((r) => ({ ...r, complexity: complexity.level, why: NETWORK_FAILOVER_WHY })) : [];
     async function* runLocalFailover(cause: unknown): AsyncGenerator<ChatPiece> {
       for (const r of localFailover) {
@@ -334,11 +346,29 @@ export function autoBackend(opts: {
         }
         return;
       }
+      if (opts.bluetooth && !signal?.aborted) {
+        const peers = await opts.bluetooth.peers(signal).catch(() => []);
+        for (const c of bluetoothCandidates(peers, workload, inputs)) {
+          const it = bluetoothBackend(opts.bluetooth, c.peer)(req, signal);
+          let first: IteratorResult<ChatPiece>;
+          try {
+            first = await it.next();
+          } catch {
+            if (signal?.aborted) break;
+            continue;
+          }
+          opts.onRoute?.({ placement: "local", bluetooth: c.peer.name, model: c.peer.model, cSatsPerSecond: 0, reason: c.reason, why: BLUETOOTH_FAILOVER_WHY, complexity: complexity.level });
+          for (let n = first; !n.done; n = await it.next()) {
+            yield "done" in n.value ? { ...n.value, where: `${c.reason} (${BLUETOOTH_FAILOVER_WHY})` } : n.value;
+          }
+          return;
+        }
+      }
       throw cause;
     }
     if (!routes.length) {
       const err = noRouteError(noRouteMessage(policy, inputs, planOpts, workload), planOpts.computeClass);
-      if (localFailover.length && networkUnreachableError(err)) {
+      if (failover && networkUnreachableError(err)) {
         yield* runLocalFailover(err);
         return;
       }
@@ -380,8 +410,9 @@ export function autoBackend(opts: {
       }
       return;
     }
-    // Every network route failed only because the network couldn't be reached: this computer takes it.
-    if (localFailover.length && errs.length && errs.every(networkUnreachableError)) {
+    // Every network route failed only because the network couldn't be reached: this computer takes
+    // it, else an allowed nearby device over Bluetooth.
+    if (failover && errs.length && errs.every(networkUnreachableError)) {
       yield* runLocalFailover(lastErr);
       return;
     }

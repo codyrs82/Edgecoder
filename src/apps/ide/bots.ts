@@ -2593,7 +2593,7 @@ export type BotChatFn = ChatFn & { escalate?: () => boolean; summarize?: (text: 
 export function routeChoiceNote(r: Route, policy: ComputePolicy, why = r.why): string | undefined {
   if (!why) return undefined;
   const on = r.bestFit ? "network best fit" :
-    `${r.model} ${r.placement === "local" ? "on this computer" : r.placement === "mine" ? "on your machines" : r.placement === "reserved" ? "on your reserved machine" : "on the network"}`;
+    `${r.model} ${r.bluetooth ? `on ${r.bluetooth} over Bluetooth` : r.placement === "local" ? "on this computer" : r.placement === "mine" ? "on your machines" : r.placement === "reserved" ? "on your reserved machine" : "on the network"}`;
   return `${policy === "local_first" ? "Local first" : policy === "auto" ? "Auto" : policy === "network_only" ? "Network only" : "Compute"} → ${on} (${why})`;
 }
 

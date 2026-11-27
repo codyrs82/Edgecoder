@@ -71,7 +71,8 @@ import { createUpdateNudge } from "./update-nudge.js";
 import { IdleWaitLateness, MeshSocketConfirmation } from "./mesh-socket-health.js";
 import { autoUpdateSetting } from "../install/update-schedule.js";
 import { startUpdateDrain } from "./update-drain.js";
-import { createLocalForwarder } from "./local-forwarder.js";
+import { createLocalForwarder, type LocalForwarderBle } from "./local-forwarder.js";
+import { bleOfflineLink as makeBleOfflineLink } from "../mesh/ble/ble-offline-link.js";
 import { ServingJobs } from "./serving-jobs.js";
 import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, handBackOnCriticalPressure, type GoingOfflineReason } from "./agent-lifecycle.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
@@ -712,11 +713,15 @@ let sandboxDown = false;
 let sandboxImagesReady = SANDBOX_MODE !== "docker";
 let sandboxImagesBuilding = false;
 
+/** Bluetooth failover for the app's calls (/forward/ble/*), set once the BLE mesh is up. */
+let bleOfflineLink: LocalForwarderBle | null = null;
+
 // The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
 const LOCAL_FORWARD_PORT = W.LOCAL_FORWARD_PORT ?? 0;
 if (LOCAL_FORWARD_PORT > 0) {
   let forwardToken: string | undefined;
   createLocalForwarder({
+    ble: () => bleOfflineLink,
     token: () => (forwardToken ??= resolveIdeToken()),
     coordinatorUrl: () => registeredWithUrl,
     steering: () => steeringStatus,
@@ -2118,6 +2123,13 @@ async function loop(): Promise<void> {
         meshTokenHash: computeMeshTokenHash(),
       });
       bleTransport.startScanning();
+      // The app's calls while the network is out of reach: allowed nearby devices only, free (no co-sign).
+      bleOfflineLink = makeBleOfflineLink({
+        agentId: AGENT_ID,
+        transport: bleTransport,
+        meshToken: () => meshAuthToken,
+        sign: (payload) => signPayload(payload, keys.privateKeyPem),
+      });
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
@@ -2187,6 +2199,7 @@ async function loop(): Promise<void> {
     } catch (e) {
       console.warn(`[agent:${AGENT_ID}] BLE mesh init failed (non-fatal): ${String(e)}`);
       bleTransport = null;
+      bleOfflineLink = null;
     }
   }
   // ── Binary integrity self-check ──
