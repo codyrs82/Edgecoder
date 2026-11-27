@@ -27,7 +27,7 @@
 import { request } from "undici";
 import { z } from "zod";
 import type { CoordinatorApp } from "../app.js";
-import { identity, coordinatorKeys, mesh, CC, queue, requestOrigin } from "../context.js";
+import { identity, coordinatorKeys, mesh, CC, queue, requestOrigin, registryTrust, MESH_PEER_ALLOWLIST } from "../context.js";
 import { networkTag } from "../../lan-proximity.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
@@ -53,6 +53,7 @@ import {
   worldOwnerTag,
   regionInfo,
   toPublicWorld,
+  withRegistryStatus,
   worldMaskKey,
   type LocalWorld,
   type LocalWorldRequest,
@@ -88,14 +89,21 @@ const ALLOWLIST_PINS = (() => {
   }
 })();
 
+/** Allowlist pins, plus the registry's trusted members at their verified URL (the allowlist wins). */
+function worldPins(): Map<string, string> {
+  return new Map([...registryTrust.urlPins(), ...ALLOWLIST_PINS]);
+}
+
 /**
- * Coordinators this one is meshed with: the peer table (approved, not itself, not an agent) plus the
- * pinned allowlist entries, one per URL. A pinned URL wins over an announced one.
+ * Coordinators this one is meshed with: the peer table (approved, not itself, not an agent, not
+ * suspended in the registry unless allowlisted) plus the pinned allowlist entries and trusted
+ * registry members, one per URL. A pinned URL wins over an announced one.
  */
-export function peerCoordinators(pins: ReadonlyMap<string, string> = ALLOWLIST_PINS): Array<{ peerId: string; url: string }> {
+export function peerCoordinators(pins: ReadonlyMap<string, string> = worldPins()): Array<{ peerId: string; url: string }> {
   const candidates = new Map<string, string>();
   for (const p of mesh.listPeers()) {
     if (agentCapabilities.has(p.peerId) || !isApprovedCoordinator(p.peerId)) continue;
+    if (registryTrust.listing(p.peerId) === "suspended" && !MESH_PEER_ALLOWLIST.has(p.peerId)) continue;
     candidates.set(p.peerId, p.coordinatorUrl);
   }
   for (const [peerId, url] of pins) candidates.set(peerId, url);
@@ -281,13 +289,15 @@ function peerWorldForRouting(peer: { peerId: string; url: string }, nowMs: numbe
 export async function worldView(callerAccountId: string | null, nowMs = Date.now(), lanFor?: { callerNetTag: string | null }): Promise<PublicWorld> {
   const peers = peerCoordinators();
   const [self, ...views] = await Promise.all([cachedLocalWorld(nowMs), ...peers.map((p) => fetchPeerWorld(p, nowMs))]);
-  return toPublicWorld(
+  const world = toPublicWorld(
     self,
     peers.map((p, i) => ({ url: p.url, id: p.peerId, world: views[i], rttMs: linkRtt(p.peerId, nowMs) })),
     callerAccountId,
     nowMs,
     lanFor
   );
+  // The Network page labels each coordinator: platform, probation, active or suspended.
+  return withRegistryStatus(world, (id) => registryTrust.listing(id));
 }
 
 /** Fixed one-minute window per caller; the map is bounded. */

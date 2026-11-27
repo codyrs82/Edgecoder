@@ -9,6 +9,7 @@ import {
   parseLocalWorld,
   regionInfo,
   toPublicWorld,
+  withRegistryStatus,
   worldMaskKey,
   worldOwnerTag,
   type AgentFacts,
@@ -144,6 +145,21 @@ describe("status, region and models", () => {
 });
 
 describe("coordinators and links", () => {
+  it("labels coordinators with their registry status (platform, probation, active, suspended), none when unlisted", () => {
+    const self = world("coord-us", "https://us.example", []);
+    const peers = ["coord-p", "coord-a", "coord-s", "coord-x"].map((id) => ({ url: `https://${id}.example`, id, world: null, rttMs: null }));
+    const listing: Record<string, "platform" | "probation" | "active" | "suspended"> = { "coord-us": "platform", "coord-p": "probation", "coord-a": "active", "coord-s": "suspended" };
+    const v = withRegistryStatus(toPublicWorld(self, peers, null, NOW), (id) => listing[id] ?? null);
+    expect(v.coordinators.map((c) => [c.id, c.registryStatus])).toEqual([
+      ["coord-us", "platform"],
+      ["coord-p", "probation"],
+      ["coord-a", "active"],
+      ["coord-s", "suspended"],
+      ["coord-x", undefined]
+    ]);
+    expect("registryStatus" in v.coordinators[4]).toBe(false);
+  });
+
   it("lists the coordinator asked, reachable peers with their agents and unreachable ones without", () => {
     const self = world("coord-us", "https://us.example", [facts("a")], [{ from: "coord-us", to: "coord-eu", rttMs: 88.6 }]);
     const peer = world("coord-eu", "https://eu.example", [facts("b"), facts("c")]);

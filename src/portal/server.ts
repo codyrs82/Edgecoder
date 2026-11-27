@@ -77,8 +77,10 @@ import {
 import { clientIp, parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, deleteDnsRecord } from "./dns-manager.js";
-import { createPlatformCoordinatorPicker, parsePlatformCoordinators } from "./platform-coordinators.js";
+import { createPlatformCoordinatorPicker, OperatorShareCap, parsePlatformCoordinators } from "./platform-coordinators.js";
 import { parseIpIntelligence } from "./ip-intelligence.js";
+import { PgRegistryStore } from "./coordinator-registry-store.js";
+import { passkeyAssertion } from "./routes/account-security.js";
 import type { CoordinatorRegistryService } from "./coordinator-registry.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
 import { autoRequestHosting, autoRequestHostingSafe, hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
@@ -157,6 +159,9 @@ let portalRegistry: CoordinatorRegistryService | null = null;
 const pickPlatformCoordinator = createPlatformCoordinatorPicker({
   coordinators: parsePlatformCoordinators(),
   registry: () => portalRegistry,
+  // Outside (community) members get new agents only with REGISTRY_STEER_OUTSIDE_MEMBERS, each operator capped.
+  includeOutside: C.REGISTRY_STEER_OUTSIDE_MEMBERS,
+  shareCap: new OperatorShareCap(C.REGISTRY_MAX_OPERATOR_SHARE_PCT / 100),
   probe: async (url) => {
     const res = await request(`${url}/health/runtime`, {
       method: "GET",
@@ -805,7 +810,8 @@ app.get("/health", QUIET_ROUTE /* no request lines, only warnings and errors */,
 
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
-const { accountSecurity, secondFactor, payoutRegistrar } = /* 2FA, payout destination cooling-off, receipts, lock */ setupAccountSecurity(app, { store, config: C, getCurrentUser, buildAccessContext, registrar: { controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal }, passkey: { rpId: PASSKEY_RP_ID, allowedOrigins: PASSKEY_ALLOWED_ORIGINS, challengeTtlMs: PASSKEY_CHALLENGE_TTL_MS, generateAuthenticationOptions, verifyAuthenticationResponse, uint8ArrayFromBase64Url, normalizePasskeyResponsePayload, deriveCredentialIdFromVerifyBody }, mail: { sendDestinationAdded: sendPayoutDestinationAddedEmail, sendAccountLocked: sendAccountLockedEmail, sendTwoFactorChanged: sendTwoFactorChangedEmail } });
+const passkeyStepUpDeps = { rpId: PASSKEY_RP_ID, allowedOrigins: PASSKEY_ALLOWED_ORIGINS, challengeTtlMs: PASSKEY_CHALLENGE_TTL_MS, generateAuthenticationOptions, verifyAuthenticationResponse, uint8ArrayFromBase64Url, normalizePasskeyResponsePayload, deriveCredentialIdFromVerifyBody };
+const { accountSecurity, secondFactor, payoutRegistrar } = /* 2FA, payout destination cooling-off, receipts, lock */ setupAccountSecurity(app, { store, config: C, getCurrentUser, buildAccessContext, registrar: { controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal }, passkey: passkeyStepUpDeps, mail: { sendDestinationAdded: sendPayoutDestinationAddedEmail, sendAccountLocked: sendAccountLockedEmail, sendTwoFactorChanged: sendTwoFactorChangedEmail } });
 
 const portalGrowth = setupPortalGrowth(app, { pool: store?.pool ?? null, portalUrl: PORTAL_PUBLIC_URL, getCurrentUser, buildAccessContext }); // Growth signals (src/portal/growth.ts): campaign visit counts, sign-up alerts, the daily digest
 const authRouteDeps = { onSignup: portalGrowth.onSignup, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
@@ -950,7 +956,18 @@ await app.register(async (internal) => {
   registerSecurityResearchInternalRoute(internal, { store }); portalAlerting.registerInternal(internal); // + POST /internal/alerts/backup-report
 }); // end /internal plugin (#40)
 
-registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); portalRegistry = registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
+registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); portalRegistry = registerPortalRegistry(app, {
+  // Signed coordinator registry: members and audit in the portal Postgres; approvals need the owner's passkey.
+  requireOpsUser: requireCoordinatorOperationsUser,
+  currentUser: getCurrentUser,
+  store: store ? new PgRegistryStore(store.pool) : undefined,
+  operatorAccount: async (userId) => {
+    const user = store ? await store.getUserById(userId) : null;
+    if (!user || !store) return { exists: false, emailVerified: false, passkeys: 0 };
+    return { exists: true, emailVerified: user.emailVerified, passkeys: (await store.listPasskeysByUserId(userId)).length };
+  },
+  passkey: store ? passkeyAssertion(passkeyStepUpDeps, store) : null
+});
 
 // DNS staleness sweep (src/portal/dns-sweep.ts).
 startDnsStaleSweep(store);

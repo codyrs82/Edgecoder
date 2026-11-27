@@ -324,9 +324,10 @@ export function portalAuthedPageHtml(input: {
           var post = function(path, body) { return origFetch(path, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }); };
           var toBuf = function(v) { v = String(v).replace(/-/g, "+").replace(/_/g, "/"); v += "=".repeat((4 - (v.length % 4)) % 4); var bin = atob(v); var a = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a.buffer; };
           var toB64u = function(buf) { var b = new Uint8Array(buf); var str = ""; for (var i = 0; i < b.length; i++) str += String.fromCharCode(b[i]); return btoa(str).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, ""); };
-          async function passkeyStepUp() {
+          /* A passkey assertion for the challenge that optionsPath issues: { challengeId, credentialId, response }. */
+          async function passkeyAssertion(optionsPath) {
             if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("passkeys_unsupported");
-            var r = await post("/portal/api/security/2fa/passkey/options");
+            var r = await post(optionsPath);
             var o = await r.json();
             if (!r.ok) throw new Error(o.error || "passkey_options_failed");
             var opts = o.options || {};
@@ -337,7 +338,12 @@ export function portalAuthedPageHtml(input: {
             var response = { id: cred.id, rawId: toB64u(cred.rawId), type: cred.type, clientExtensionResults: {}, response: {
               clientDataJSON: toB64u(cred.response.clientDataJSON), authenticatorData: toB64u(cred.response.authenticatorData),
               signature: toB64u(cred.response.signature), userHandle: cred.response.userHandle ? toB64u(cred.response.userHandle) : undefined } };
-            var v = await post("/portal/api/security/2fa/passkey/verify", { challengeId: o.challengeId, credentialId: cred.id, response: response });
+            return { challengeId: o.challengeId, credentialId: cred.id, response: response };
+          }
+          window.edgecoderPasskeyAssertion = passkeyAssertion;
+          async function passkeyStepUp() {
+            var a = await passkeyAssertion("/portal/api/security/2fa/passkey/options");
+            var v = await post("/portal/api/security/2fa/passkey/verify", a);
             if (!v.ok) throw new Error("passkey_verification_failed");
           }
           async function stepUp(methods) {

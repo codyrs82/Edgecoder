@@ -469,7 +469,7 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | `EDGECODER_COMPUTE_CLASS` | unset | Compute class a client prefers when it picks a coordinator. |
 | `EDGECODER_REGISTRY_URLS` | `<platform URL>/network/registry` | Comma-separated signed-registry URLs. |
 | `EDGECODER_REGISTRY_URL` | unset | Single-URL form, used when `EDGECODER_REGISTRY_URLS` is unset. |
-| `EDGECODER_REGISTRY_PUBLIC_KEYS` | built-in keys | Extra pinned registry keys (PEM or 64-hex Ed25519). Invalid entries are dropped. |
+| `EDGECODER_REGISTRY_PUBLIC_KEYS` | built-in keys (none yet) | Extra pinned registry keys (PEM or 64-hex Ed25519), added to `DEFAULT_REGISTRY_PUBLIC_KEYS`. Invalid entries are dropped. Clients use them to verify steering; coordinators use them to trust registry members as peers (probation or active, never suspended). With no key pinned the registry is ignored. |
 | `EDGECODER_REGISTRY_PUBLIC_KEY` | unset | Single-key form, used when `EDGECODER_REGISTRY_PUBLIC_KEYS` is unset. |
 | `EDGECODER_NOSTR_ANNOUNCE` | unset | Coordinator: `1` publishes its signed announcement to Nostr. |
 | `EDGECODER_NOSTR_ANNOUNCE_INTERVAL_MS` | `300000` | Coordinator: announcement interval (min 15000). |
@@ -480,8 +480,12 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | `PORTAL_DISCOVERY` | `ordered` | Portal: `selector` picks coordinators by score, `ordered` tries them in list order. |
 | `PORTAL_DISCOVERY_SOURCES` | `static` | Portal: comma list of `static`, `dns`, `nostr`. |
 | `PORTAL_PLATFORM_COORDINATOR_URLS` | `COORDINATOR_DISCOVERY_URLS`, else the US and EU seeds | Portal: the platform coordinators `/nodes/discover-coordinator` may hand a new agent, comma-separated `https://host[=region]` (region read from a `-eu`/`-us` host label when omitted). The agent's country picks the region, else the first healthy one in order. EdgeCoder-run members of the signed registry are added once it is configured; enrolled coordinators are never returned. |
-| `REGISTRY_SEEDS` | unset | Portal: EdgeCoder's own coordinators, comma-separated `peerId:fingerprint@https://host[=region]`. |
-| `REGISTRY_POOL_FILE` | unset | Portal: JSON file of admitted community coordinators. |
+| `REGISTRY_SEEDS` | unset | Portal: EdgeCoder's own coordinators, comma-separated `peerId:fingerprint@https://host[=region]`. Written to the portal Postgres as active platform members. Community members and the audit trail live in Postgres too. |
+| `REGISTRY_PROBATION_DAYS` | `7` | Portal: clean UTC days in a row a newly approved community coordinator serves on probation before it is active. |
+| `REGISTRY_MAX_MEMBERS_PER_OPERATOR` | `2` | Portal: most coordinators one operator account may hold (pending, probation or active). |
+| `REGISTRY_IDENTITY_SUSPEND_AFTER_MS` | `600000` | Portal: a community coordinator whose `/identity` key challenge keeps failing this long is suspended (it is marked unhealthy at the first failure). |
+| `REGISTRY_STEER_OUTSIDE_MEMBERS` | off | Portal: `1` or `true` also hands new agents to active community coordinators. Leave off until outside coordinators can bill. |
+| `REGISTRY_MAX_OPERATOR_SHARE_PCT` | `25` | Portal: with outside steering on, the most of new-agent assignments (rolling hour) one outside operator may get. |
 | `REGISTRY_SIGNING_KEY_PEM` | unset | Portal: Ed25519 private key (PKCS#8 PEM) that signs the registry. Without it the registry is not served. |
 | `REGISTRY_TTL_MS` | `900000` | Portal: how long a signed registry is valid. Values under 60000 use the default. |
 | `REGISTRY_HEALTH_INTERVAL_MS` | `60000` | Portal: interval between coordinator health checks. |

@@ -101,9 +101,9 @@ export function isAllowlistedKey(allowlist: PeerAllowlist, peerId: string, publi
 }
 
 /**
- * Whether `publicKeyPem` is a key this coordinator trusts for coordinator `peerId`. Today that is
- * the static MESH_PEER_ALLOWLIST; `extra` is the hook for a second source (the signed coordinator
- * registry), so a peer is trusted if either source names its key.
+ * Whether `publicKeyPem` is a key this coordinator trusts for coordinator `peerId`: the static
+ * MESH_PEER_ALLOWLIST, or `extra` (the signed coordinator registry's members on probation or
+ * active, src/discovery/registry-trust.ts), so a peer is trusted if either source names its key.
  */
 export type PeerKeyTrust = (peerId: string, publicKeyPem: string) => boolean;
 
@@ -155,10 +155,12 @@ export function checkPeerRegistration(input: {
   production: boolean;
   /** Who is trusted (default: the allowlist alone); the hook for the signed registry. */
   trusted?: PeerKeyTrust;
+  /** True when `trusted` has a source besides the allowlist (a pinned registry key). */
+  registryTrust?: boolean;
   nowMs?: number;
 }): TrustDecision {
   const { body, allowlist } = input;
-  if (allowlist.size === 0) {
+  if (allowlist.size === 0 && !input.registryTrust) {
     return input.production ? { ok: false, code: 403, error: "peer_allowlist_required" } : { ok: true, mode: "legacy_token" };
   }
   const trusted = input.trusted ?? peerKeyTrust(allowlist);
@@ -184,8 +186,8 @@ export type PeerSource = "register" | "bootstrap" | "gossip";
  * with its endpoint resolved, or null when refused.
  *
  * Enforced (allowlist set, or production):
- * - Only an allowlisted (peerId, key) pair is admitted.
- * - The endpoint is pinned. It comes from the allowlist `@url` if set; otherwise from bootstrap
+ * - Only a trusted (peerId, key) pair is admitted (the allowlist, or the signed registry's members).
+ * - The endpoint is pinned. It comes from the allowlist `@url` (or the registry's verified URL) if set; otherwise from bootstrap
  *   (the URL we reached the peer on). Registration must match a pin when one exists. Gossip never
  *   sets an endpoint: it can only (re)admit a peer whose endpoint is pinned or already known.
  * - An existing entry is replaced only if it is a squatter (not allowlisted) or `authoritative`.
@@ -193,6 +195,8 @@ export type PeerSource = "register" | "bootstrap" | "gossip";
  */
 export function admitPeer<P extends { peerId: string; publicKeyPem: string; coordinatorUrl: string }>(input: {
   allowlist: PeerAllowlist;
+  /** Which keys are trusted (default: the allowlist; the coordinator adds the signed registry). */
+  trusted?: PeerKeyTrust;
   pins?: PeerUrlPins;
   production: boolean;
   peer: P;
@@ -203,8 +207,9 @@ export function admitPeer<P extends { peerId: string; publicKeyPem: string; coor
   const { allowlist, peer, existing } = input;
   const source = input.source ?? (input.authoritative ? "register" : "gossip");
   if (!allowlistEnforced(allowlist, input.production)) return !existing || input.authoritative === true ? peer : null;
-  if (!isAllowlistedKey(allowlist, peer.peerId, peer.publicKeyPem)) return null;
-  const existingTrusted = !!existing && isAllowlistedKey(allowlist, existing.peerId, existing.publicKeyPem);
+  const trusted = input.trusted ?? peerKeyTrust(allowlist);
+  if (!trusted(peer.peerId, peer.publicKeyPem)) return null;
+  const existingTrusted = !!existing && trusted(existing.peerId, existing.publicKeyPem);
   if (existingTrusted && !input.authoritative) return null;
   const pin = input.pins?.get(peer.peerId);
   const claimed = canonicalPeerUrl(peer.coordinatorUrl);

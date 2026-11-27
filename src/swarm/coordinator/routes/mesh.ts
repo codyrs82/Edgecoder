@@ -7,7 +7,6 @@
 import { matchesTokenSet } from "../../../common/token-rotation.js";
 import { z } from "zod";
 import { readHeaderValue, mayRelayOverWs } from "../../coordinator-utils.js";
-import { createRegistryMirror } from "../../../discovery/registry-mirror.js";
 import type {
   MeshPeerIdentity,
   CapabilitySummaryPayload,
@@ -47,7 +46,6 @@ import {
   COORDINATOR_PUBLIC_URL,
   requestOrigin,
   mesh,
-  PORTAL_SERVICE_URL,
   CC,
   MESH_AUTH_TOKEN,
   MESH_AUTH_TOKENS,
@@ -66,6 +64,8 @@ import {
   SECURITY_NONCE_TTL_MS,
   securityLog,
   trustedPeerKey,
+  registryMirror,
+  registryTrust,
   MESH_TOKEN_REQUIRED_FOR_PEERS
 } from "../context.js";
 import {
@@ -89,12 +89,6 @@ const IDENTITY_FINGERPRINT = publicKeyFingerprint(identity.publicKeyPem);
 // #147: the desktop app proves an agent already on :4301 is the one it started (src/trust/local-attest.ts).
 const localAttestNonces = new NonceLog();
 
-// The portal's signed coordinator registry, mirrored so the one platform URL serves it too
-// (src/discovery/registry-mirror.ts). REGISTRY_UPSTREAM_URL overrides the source.
-const REGISTRY_PORTAL_URL = PORTAL_SERVICE_URL || CC.PORTAL_PUBLIC_URL;
-const registryMirror = createRegistryMirror({
-  upstreamUrl: CC.REGISTRY_UPSTREAM_URL || `${REGISTRY_PORTAL_URL.replace(/\/+$/, "")}/network/registry`
-});
 
 const peerSchema = z.object({
   peerId: z.string(),
@@ -608,7 +602,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     }
     // #52: a credential alone is not enough; the peer's key must be allowlisted and the
     // registration signed with it. (Coordinators are never admitted here by a portal token.)
-    const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction(), trusted: trustedPeerKey });
+    const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction(), trusted: trustedPeerKey, registryTrust: registryTrust.enabled });
     if (!trust.ok) {
       app.log.warn({ peerId: body.peerId, error: trust.error }, "peer_registration_rejected");
       return reply.code(trust.code).send({ error: trust.error });

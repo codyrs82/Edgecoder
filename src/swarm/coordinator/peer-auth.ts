@@ -4,8 +4,8 @@
 /**
  * Signed peer requests (coordinator to coordinator). A peer coordinator signs each request to a
  * peer route with its own Ed25519 key (src/mesh/peer-trust.ts signPeerRequest); the receiver
- * admits it when that key is one it trusts for the peer (MESH_PEER_ALLOWLIST today; the signed
- * registry later, context.ts trustedPeerKey).
+ * admits it when that key is one it trusts for the peer (MESH_PEER_ALLOWLIST, or the signed
+ * registry's members on probation or active: context.ts trustedPeerKey).
  *
  * Migration without downtime:
  * - Outbound: every peer call is signed, and still carries MESH_AUTH_TOKEN while one is configured,
@@ -30,7 +30,7 @@ import {
   coordinatorKeys,
   meshTokenFor,
   MESH_TOKEN_REQUIRED_FOR_PEERS,
-  MESH_PEER_ALLOWLIST,
+  PEER_KEY_TRUST_CONFIGURED,
   trustedPeerKey,
   nonceStore,
   SECURITY_NONCE_TTL_MS
@@ -68,11 +68,11 @@ export function isPeerGateRoute(method: string, path: string): boolean {
 }
 
 /**
- * Whether peer signatures are checked at all. With no trusted keys configured (empty allowlist)
- * nothing could be trusted by key, so the signature is ignored and the mesh token decides, as before.
+ * Whether peer signatures are checked at all. With no trusted keys configured (empty allowlist and
+ * no pinned registry key) nothing could be trusted by key, so the signature is ignored and the mesh token decides, as before.
  */
 export function peerSignaturesChecked(): boolean {
-  return MESH_PEER_ALLOWLIST.size > 0;
+  return PEER_KEY_TRUST_CONFIGURED();
 }
 
 /**

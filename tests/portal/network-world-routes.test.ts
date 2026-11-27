@@ -139,6 +139,17 @@ describe("activity through the portal", () => {
     }
   });
 
+  it("passes each coordinator's registry status through, and nothing else in its place", () => {
+    const w = cleanWorld({
+      coordinators: [
+        { id: ORD, url: "https://a.example", registryStatus: "probation" },
+        { id: "coord-b", url: "https://b.example", registryStatus: "<script>" },
+        { id: "coord-c", url: "https://c.example" }
+      ]
+    });
+    expect((w.coordinators as Array<Record<string, unknown>>).map((c) => c.registryStatus)).toEqual(["probation", null, null]);
+  });
+
   it("keeps a machine's counts only, bounded, and drops anything else in them", () => {
     const w = cleanWorld({
       coordinators: [{ id: ORD, url: "https://a.example" }],

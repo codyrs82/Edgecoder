@@ -23,6 +23,11 @@ kill_timeout = 100
   # #35: ordered list; the portal uses the first healthy one (cached 60 s). Custom domains with
   # Fly-issued certs (dns-only CNAMEs -> the seed apps); US primary, EU fallback.
   COORDINATOR_DISCOVERY_URLS = "https://coordinator.edgecoder.io,https://coordinator-eu.edgecoder.io"
+  # Signed coordinator registry (src/portal/coordinator-registry.ts): the US and EU seeds as platform
+  # members, `peerId:fingerprint@url=region` from each seed's GET /identity trustEntry. Written to the
+  # portal Postgres as active members. The registry is served only once REGISTRY_SIGNING_KEY_PEM is set
+  # (a secret, generated offline).
+  REGISTRY_SEEDS = "coord-25bacdd7b3f3:ef50370733f0c02751c1617e6e66eca1bcb641542c82098a3479eac7ef59b3a8@https://coordinator.edgecoder.io=us,coord-b17fb990ea6b:df0500ee7020c4f3ea0676762b8dbe66a4ac7f4820707b00ee17b1cf36637ed9@https://coordinator-eu.edgecoder.io=eu"
   # Portal admins (coordinator ops + admin APIs) are not set here. Set the comma-separated
   # allowlist as a secret so it stays out of the repo:
   #   fly secrets set SYSTEM_ADMIN_EMAILS=admin@example.com,ops@example.com -a <portal app>

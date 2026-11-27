@@ -196,8 +196,14 @@ export const portalConfigSchema = z.object({
   REGISTRY_HEALTH_INTERVAL_MS: envNumber(undefined, { min: 0 }),
   REGISTRY_FALLBACK_URLS: optStr,
   REGISTRY_SEEDS: optStr,
-  REGISTRY_POOL_FILE: optStr,
   REGISTRY_SIGNING_KEY_PEM: optStr,
+  /** Clean UTC days a new community coordinator serves on probation (coordinator-registry.ts). */
+  REGISTRY_PROBATION_DAYS: envInt(undefined, { min: 1, max: 365 }),
+  REGISTRY_MAX_MEMBERS_PER_OPERATOR: envInt(undefined, { min: 1, max: 100 }),
+  REGISTRY_IDENTITY_SUSPEND_AFTER_MS: envInt(undefined, { min: 0 }),
+  /** Hand new agents to active community members too (off until outside billing exists). */
+  REGISTRY_STEER_OUTSIDE_MEMBERS: envFlag({ on: ["1", "true"] }),
+  REGISTRY_MAX_OPERATOR_SHARE_PCT: envNumber(25, { min: 1, max: 100 }),
 
   // ---- coordinator DNS records (dns-manager.ts) ----
   GODADDY_API_KEY: optStr,

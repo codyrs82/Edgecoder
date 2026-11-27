@@ -106,7 +106,9 @@ export const RETAINED_USER_COLUMNS: Readonly<Record<string, string>> = {
   "portal_admin_audit.actor_email": "audit history, kept by design",
   "portal_admin_audit.target_user_id": "audit history, kept by design",
   "portal_admin_audit.target_email_hash": "audit history, kept by design",
-  "portal_admin_audit.target_email_hint": "audit history (a masked hint, not the address)"
+  "portal_admin_audit.target_email_hint": "audit history (a masked hint, not the address)",
+  "portal_registry_members.operator_user_id": "a coordinator in the signed registry: the owner suspends it (coordinator-registry.ts), deleting the account does not",
+  "portal_registry_audit.actor_user_id": "registry audit chain, append-only by design"
 };
 
 export function deleteStatement(step: DeleteStep, userId: string, email: string): { sql: string; params: unknown[] } {

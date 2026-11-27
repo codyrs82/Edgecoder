@@ -108,8 +108,17 @@ export function createSecondFactorGate(security: AccountSecurity | null, store: 
 
 /** Admin mutations: the routes under these prefixes (POST/PUT/PATCH/DELETE). */
 const ADMIN_ACTION_PREFIXES = ["/portal/api/admin/", "/coordinator/ops/", "/admin/network/registry/"];
+/**
+ * Admin routes that check a passkey assertion made for that one action themselves (registry
+ * approvals, src/portal/coordinator-registry.ts), and the route that issues its challenge: a
+ * session step-up would add nothing, and asking for one would mean confirming twice.
+ */
+const OWN_PASSKEY_ADMIN_ROUTES: ReadonlySet<string> = new Set(["/admin/network/registry/passkey-options", "/admin/network/registry/approve"]);
 export const isAdminActionRoute = (method: string, url: string | undefined) =>
-  Boolean(url) && ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase()) && ADMIN_ACTION_PREFIXES.some((p) => url!.startsWith(p));
+  Boolean(url) &&
+  ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase()) &&
+  ADMIN_ACTION_PREFIXES.some((p) => url!.startsWith(p)) &&
+  !OWN_PASSKEY_ADMIN_ROUTES.has(url!);
 
 /**
  * Admin actions need the second factor when the admin has 2FA, and system admins must have it:
@@ -166,6 +175,55 @@ function linkPage(input: { title: string; heading: string; sub: string; button: 
         });
     `
   });
+}
+
+export type PasskeyAssertionResult = { ok: true } | { ok: false; status: 400 | 401 | 404 | 409 | 503; error: string };
+
+/**
+ * A fresh WebAuthn assertion by one of the user's own passkeys (user verification required):
+ * `options` issues a single-use challenge, `verify` checks the answer. The 2FA step-up uses it,
+ * and actions that need the passkey itself for that one action (registry approvals) call it directly.
+ */
+export function passkeyAssertion(pk: PasskeyStepUpDeps | undefined, store: Pick<AccountSecurityStoreDeps, "listPasskeysByUserId" | "createPasskeyChallenge" | "consumePasskeyChallenge" | "findPasskeyByCredentialId" | "updatePasskeyCounter"> | null | undefined) {
+  return {
+    async options(user: { userId: string; email?: string }): Promise<{ ok: true; challengeId: string; options: unknown } | { ok: false; status: 409 | 503; error: string }> {
+      if (!pk || !store?.createPasskeyChallenge) return { ok: false, status: 503, error: "passkeys_not_configured" };
+      const passkeys = await store.listPasskeysByUserId(user.userId);
+      if (!passkeys.length) return { ok: false, status: 409, error: "passkey_not_registered" };
+      const options = await pk.generateAuthenticationOptions({
+        rpID: pk.rpId,
+        timeout: 60000,
+        userVerification: "required",
+        allowCredentials: passkeys.map((p) => ({ id: p.credentialId, transports: p.transports as any }))
+      });
+      const challengeId = randomUUID();
+      await store.createPasskeyChallenge({ challengeId, userId: user.userId, email: user.email, challenge: options.challenge, flowType: "authentication", expiresAtMs: Date.now() + pk.challengeTtlMs });
+      return { ok: true, challengeId, options };
+    },
+    async verify(user: { userId: string }, body: unknown): Promise<PasskeyAssertionResult> {
+      if (!pk || !store?.consumePasskeyChallenge || !store.findPasskeyByCredentialId) return { ok: false, status: 503, error: "passkeys_not_configured" };
+      const parsed = z.object({ challengeId: z.string().min(10).max(64), credentialId: z.string().min(10).max(1024).optional(), response: z.unknown() }).safeParse(body ?? {});
+      if (!parsed.success) return { ok: false, status: 400, error: "invalid_request" };
+      const challenge = await store.consumePasskeyChallenge(parsed.data.challengeId);
+      if (!challenge || challenge.flowType !== "authentication" || challenge.userId !== user.userId) return { ok: false, status: 400, error: "passkey_challenge_invalid" };
+      const credentialId = pk.deriveCredentialIdFromVerifyBody(parsed.data as { credentialId?: string; response: unknown });
+      const credential = credentialId ? await store.findPasskeyByCredentialId(credentialId) : null;
+      if (!credential || credential.userId !== user.userId) return { ok: false, status: 404, error: "passkey_credential_not_found" };
+      const verification = await pk
+        .verifyAuthenticationResponse({
+          response: pk.normalizePasskeyResponsePayload(parsed.data.response) as any,
+          expectedChallenge: challenge.challenge,
+          expectedOrigin: pk.allowedOrigins,
+          expectedRPID: pk.rpId,
+          requireUserVerification: true,
+          credential: { id: credential.credentialId, publicKey: pk.uint8ArrayFromBase64Url(credential.publicKeyB64Url), counter: Number(credential.counter), transports: credential.transports as any }
+        })
+        .catch(() => null);
+      if (!verification?.verified) return { ok: false, status: 401, error: "passkey_verification_failed" };
+      await store.updatePasskeyCounter?.(credential.credentialId, Number(verification.authenticationInfo.newCounter ?? credential.counter));
+      return { ok: true };
+    }
+  };
 }
 
 export function registerAccountSecurityRoutes(app: FastifyInstance, d: AccountSecurityRouteDeps): void {
@@ -264,46 +322,16 @@ export function registerAccountSecurityRoutes(app: FastifyInstance, d: AccountSe
   app.post("/portal/api/security/2fa/passkey/options", async (req, reply) => {
     const a = await signedIn(req, reply);
     if (!a) return reply;
-    const pk = d.passkey;
-    if (!pk || !a.store.createPasskeyChallenge) return reply.code(503).send({ error: "passkeys_not_configured" });
-    const passkeys = await a.store.listPasskeysByUserId(a.user.userId);
-    if (!passkeys.length) return reply.code(409).send({ error: "passkey_not_registered" });
-    const options = await pk.generateAuthenticationOptions({
-      rpID: pk.rpId,
-      timeout: 60000,
-      userVerification: "required",
-      allowCredentials: passkeys.map((p) => ({ id: p.credentialId, transports: p.transports as any }))
-    });
-    const challengeId = randomUUID();
-    await a.store.createPasskeyChallenge({ challengeId, userId: a.user.userId, email: a.user.email, challenge: options.challenge, flowType: "authentication", expiresAtMs: Date.now() + pk.challengeTtlMs });
-    return reply.send({ challengeId, options });
+    const r = await passkeyAssertion(d.passkey, a.store).options(a.user);
+    if (!r.ok) return reply.code(r.status).send({ error: r.error });
+    return reply.send({ challengeId: r.challengeId, options: r.options });
   });
 
   app.post("/portal/api/security/2fa/passkey/verify", async (req, reply) => {
     const a = await signedIn(req, reply);
     if (!a) return reply;
-    const pk = d.passkey;
-    const s = a.store;
-    if (!pk || !s.consumePasskeyChallenge || !s.findPasskeyByCredentialId) return reply.code(503).send({ error: "passkeys_not_configured" });
-    const parsed = z.object({ challengeId: z.string().min(10).max(64), credentialId: z.string().min(10).max(1024).optional(), response: z.unknown() }).safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
-    const challenge = await s.consumePasskeyChallenge(parsed.data.challengeId);
-    if (!challenge || challenge.flowType !== "authentication" || challenge.userId !== a.user.userId) return reply.code(400).send({ error: "passkey_challenge_invalid" });
-    const credentialId = pk.deriveCredentialIdFromVerifyBody(parsed.data as { credentialId?: string; response: unknown });
-    const credential = credentialId ? await s.findPasskeyByCredentialId(credentialId) : null;
-    if (!credential || credential.userId !== a.user.userId) return reply.code(404).send({ error: "passkey_credential_not_found" });
-    const verification = await pk
-      .verifyAuthenticationResponse({
-        response: pk.normalizePasskeyResponsePayload(parsed.data.response) as any,
-        expectedChallenge: challenge.challenge,
-        expectedOrigin: pk.allowedOrigins,
-        expectedRPID: pk.rpId,
-        requireUserVerification: true,
-        credential: { id: credential.credentialId, publicKey: pk.uint8ArrayFromBase64Url(credential.publicKeyB64Url), counter: Number(credential.counter), transports: credential.transports as any }
-      })
-      .catch(() => null);
-    if (!verification?.verified) return reply.code(401).send({ error: "passkey_verification_failed" });
-    await s.updatePasskeyCounter?.(credential.credentialId, Number(verification.authenticationInfo.newCounter ?? credential.counter));
+    const r = await passkeyAssertion(d.passkey, a.store).verify(a.user, req.body);
+    if (!r.ok) return reply.code(r.status).send({ error: r.error });
     const sessionHash = sessionHashOf(req);
     if (sessionHash) await a.security.grantStepUp(a.user.userId, sessionHash);
     return reply.send({ ok: true, via: "passkey" });

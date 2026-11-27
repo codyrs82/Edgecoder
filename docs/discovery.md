@@ -208,6 +208,8 @@ The signature covers the exact `payload` string, so no canonical JSON is needed.
 - `admittedAtMs`
 - `health` (`status`: `healthy`, `unhealthy` or `unknown`, plus `checkedAtMs`, `latencyMs`,
   `reason`, `consecutiveFailures`)
+- `status`: `probation`, `active` or `suspended` (absent in older documents: read as `active`).
+  A suspended member is listed, marked `unhealthy` with reason `suspended`, so peers drop it.
 
 A document is valid for 15 minutes (`REGISTRY_TTL_MS`). The portal signs it again after each
 health round, or when a third of that lifetime has passed.
@@ -220,28 +222,83 @@ signature themselves. This is why the single platform URL hands the registry out
 
 ### Pool, admission and health (portal)
 
+Members and an audit trail live in the portal Postgres (`portal_registry_members`,
+`portal_registry_audit`, created by `PortalStore.migrate()`), so every portal machine sees one pool.
+
 - **Seeds:** `REGISTRY_SEEDS` lists EdgeCoder's own coordinators as a comma list of
   `peerId:fingerprint@url[=region]`. Use the `trustEntry` from each seed's `/identity`, then its
-  URL. Repeat an entry to give a seed a second URL.
-- **Community coordinators:** a system admin adds them with
-  `POST /admin/network/registry/admissions`. This is a stub workflow, and the records are kept in
-  `REGISTRY_POOL_FILE` as JSON. `POST /admin/network/registry/suspend` takes `{ peerId, suspended }`.
-  `GET /admin/network/registry` lists every member with its admission problems and health.
-- **Admission rules** (`admissionProblems`):
-  - Every member needs a published key and valid URLs.
-  - A community member also needs `verifiedOperator` and https URLs.
-  - `stakeSats` is recorded but not enforced yet. The same goes for uptime history and the
-    reliability score.
-  - Members that fail a rule, or are suspended, are not published.
-- **Health:** every `REGISTRY_HEALTH_INTERVAL_MS` (default 60 s), each URL of each published member
-  is checked in two steps:
-  1. `GET /identity`: the peerId must match, and the key must match the fingerprint.
-  2. `GET /health/runtime`: it must return 2xx and not `ok: false`.
+  URL. Repeat an entry to give a seed a second URL. Seeds are written as `active` platform members.
+- **Applying (community operator):** `POST /portal/api/coordinators/registry/apply` with
+  `{ nodeId, publicKeyFingerprint, urls, region, contact, operatorName }`. It needs:
+  - a signed-in account with a verified email and at least one passkey;
+  - https URLs and contact details;
+  - room under the per-operator cap (`REGISTRY_MAX_MEMBERS_PER_OPERATOR`, default 2);
+  - a key challenge that passes at every URL (below), which shows the key is published and held.
+  The member is `pending` and is not published. `GET /portal/api/coordinators/registry/mine`
+  shows the operator's own members.
+- **Approving (owner):** Settings > Admin > Coordinator registry, or
+  `POST /admin/network/registry/passkey-options` then `POST /admin/network/registry/approve` with
+  `{ nodeId, challengeId, credentialId, response }`. The approval needs a passkey assertion made
+  for it (a session step-up is not enough), and the key challenge must pass again. The member goes
+  on `probation`. Approving a suspended member reinstates it on probation.
+- **Probation:** the health checker counts clean UTC days (no check found the member unhealthy).
+  A day with a failure resets the count; the day probation starts in does not count. After
+  `REGISTRY_PROBATION_DAYS` (default 7) the member is `active`.
+- **Suspending (owner):** `POST /admin/network/registry/suspend` with `{ nodeId, reason }`.
+- **Key rotation:** a new key for an existing node id is accepted only when the old key signs the
+  change, or when the owner re-approves:
+  - `POST /portal/api/coordinators/registry/rotate-key` (the operator) with
+    `{ nodeId, oldPublicKeyPem, newPublicKeyPem, issuedAtMs, signature }`. The signature is the old
+    key's Ed25519 signature over `keyRotationPayload` (`edgecoder-registry-key-rotation-v1`, node id,
+    old and new fingerprints, `issuedAtMs`, newline separated), within 10 minutes of `issuedAtMs`.
+    Status and probation are kept.
+  - Without it, the owner approves with `publicKeyFingerprint` set to the new key. Probation starts
+    again.
+- **Audit:** every application, approval, reinstatement, suspension, key change, promotion and
+  automatic suspension is a row in `portal_registry_audit`. A trigger refuses UPDATE and DELETE, and
+  each row's `hash` is sha256 over the previous row's hash and the row's fields (canonical JSON), so
+  `GET /admin/network/registry/audit` can check the chain from the first row.
+- **Admission rules** (`admissionProblems`): every published member needs a published key and valid
+  URLs; a community member also needs a verified operator and https. `stakeSats` is recorded but
+  not enforced yet.
+- **Health and the key challenge:** every `REGISTRY_HEALTH_INTERVAL_MS` (default 60 s), each URL of
+  each probation or active member is checked:
+  1. `GET /identity`: the peerId must match, and the key must match the enrolled fingerprint.
+  2. `POST /identity/challenge` with a fresh random nonce: the answer must be signed by that key
+     for that nonce and URL (`src/trust/identity-challenge.ts`), so a replayed or relayed answer
+     fails.
+  3. `GET /health/runtime`: it must return 2xx and not `ok: false`.
 - **Marking:**
-  - A wrong identity marks the member `unhealthy` at once.
+  - A wrong peerId, key, nonce or signature marks the member `unhealthy` at once. If it keeps
+    failing for `REGISTRY_IDENTITY_SUSPEND_AFTER_MS` (default 10 min), a community member is
+    suspended (EdgeCoder's own are only marked unhealthy).
   - Network or health failures mark it `unhealthy` after 2 consecutive rounds.
   - A healthy member is published with only the URLs that passed.
   - Unhealthy members stay in the document, marked, and clients exclude them.
+
+### Steering and outside coordinators
+
+Until outside coordinators can bill, they get no new agents and no billed calls:
+
+- `/nodes/discover-coordinator` hands out only EdgeCoder's own coordinators. With
+  `REGISTRY_STEER_OUTSIDE_MEMBERS` on, active community members join, and each outside operator is
+  held to `REGISTRY_MAX_OPERATOR_SHARE_PCT` (default 25 %) of new-agent assignments per rolling hour.
+- Client steering (`createCoordinatorSteering`) picks only EdgeCoder's own active members
+  (`includeOutside` is off).
+- A coordinator grants offered subtasks only to peers in its `MESH_PEER_ALLOWLIST`.
+
+### Peer trust (coordinators)
+
+A coordinator trusts a peer's key when `MESH_PEER_ALLOWLIST` names it, or when the verified
+registry lists the peer on `probation` or `active` with that key (`src/discovery/registry-trust.ts`,
+wired as `trustedPeerKey` in `src/swarm/coordinator/context.ts`). This covers signed peer
+requests, `/mesh/register-peer` and the peer table. The registry is fetched through the
+coordinator's own mirror and verified against the pinned keys (`DEFAULT_REGISTRY_PUBLIC_KEYS` plus
+`EDGECODER_REGISTRY_PUBLIC_KEYS`); with no key pinned it adds nothing. It is refreshed when half its
+signed lifetime has passed and is never used after it expires. A member that is suspended loses
+trust at the next refresh and is removed from the peer table unless the allowlist names it. The
+world view (`GET /network/world`) labels each coordinator with `registryStatus`: `platform`,
+`probation`, `active` or `suspended`.
 
 ### Clients (agent and desktop app)
 
@@ -290,21 +347,21 @@ through", as the coordinator, its region and its latency.
    openssl pkey -in registry-signing.pem -pubout -out registry-public.pem
    ```
 
-2. **Configure the portal.**
+2. **Configure the portal.** `REGISTRY_SEEDS` is set in `deploy/fly/fly.portal.toml` (the US and
+   EU seeds at their public URLs). Each seed URL must be the seed's `COORDINATOR_PUBLIC_URL`: the
+   key challenge fails at any other URL. Only the signing key is a secret:
 
    ```bash
-   fly secrets set -a edgecoder-portal \
-     REGISTRY_SIGNING_KEY_PEM="$(cat registry-signing.pem)" \
-     REGISTRY_SEEDS="$(curl -s https://edgecoder-seed.fly.dev/identity | jq -r .trustEntry)@https://edgecoder-seed.fly.dev=ord,$(curl -s https://edgecoder-seed-eu.fly.dev/identity | jq -r .trustEntry)@https://edgecoder-seed-eu.fly.dev=ams"
+   fly secrets set -a edgecoder-portal REGISTRY_SIGNING_KEY_PEM="$(cat registry-signing.pem)"
    ```
 
    Then check that `curl https://edgecoder.io/network/registry/public-key` shows the key, and that
    `curl https://edgecoder.io/network/registry` lists both seeds as `healthy` after a minute.
 
 3. **Publish the public key.** Put the PEM from `registry-public.pem` (or its 64-hex raw key) in
-   `DEFAULT_REGISTRY_PUBLIC_KEYS` in `src/discovery/registry.ts`, then release the agent and the
-   desktop app. Until that release ships, set `EDGECODER_REGISTRY_PUBLIC_KEYS` on agents to turn
-   steering on. Also publish the key where operators can compare it, for example the docs site.
+   `DEFAULT_REGISTRY_PUBLIC_KEYS` in `src/discovery/registry.ts`, with the cold second key next to
+   it, then release the agent, the desktop app and the coordinators (they use the same list for peer
+   trust). Until that release ships, set `EDGECODER_REGISTRY_PUBLIC_KEYS` on agents and coordinators. Also publish the key where operators can compare it, for example the docs site.
 4. **Rotate the key** by pinning the new key next to the old one (the list takes several keys),
    releasing, switching `REGISTRY_SIGNING_KEY_PEM`, and dropping the old key in a later release.
 
@@ -345,11 +402,15 @@ verify the key over `/identity`, so DNS stays a hint and never becomes a trust a
 | `PORTAL_DISCOVERY_SOURCES` | portal | `static` | Comma list of `static`, `dns`, `nostr` |
 | `REGISTRY_SIGNING_KEY_PEM` | portal | unset | Ed25519 PKCS#8 PEM that signs `/network/registry`; unset means the registry is not served |
 | `REGISTRY_SEEDS` | portal | unset | EdgeCoder seeds, `peerId:fingerprint@url[=region]`, comma list |
-| `REGISTRY_POOL_FILE` | portal | unset | JSON file of admitted community coordinators |
+| `REGISTRY_PROBATION_DAYS` | portal | `7` | Clean days on probation before active |
+| `REGISTRY_MAX_MEMBERS_PER_OPERATOR` | portal | `2` | Most coordinators per operator account |
+| `REGISTRY_IDENTITY_SUSPEND_AFTER_MS` | portal | `600000` | Key challenge failing this long suspends a community member |
+| `REGISTRY_STEER_OUTSIDE_MEMBERS` | portal | off | Also hand new agents to active community members |
+| `REGISTRY_MAX_OPERATOR_SHARE_PCT` | portal | `25` | Outside operator's most share of new-agent assignments |
 | `REGISTRY_TTL_MS` / `REGISTRY_HEALTH_INTERVAL_MS` | portal | `900000` / `60000` | Registry lifetime / health-check interval |
 | `REGISTRY_FALLBACK_URLS` | portal | `https://coordinator.edgecoder.io` | `fallbackUrls` in the registry |
 | `REGISTRY_UPSTREAM_URL` | coordinator | portal's `/network/registry` | Source of the coordinator's registry mirror |
-| `EDGECODER_REGISTRY_PUBLIC_KEYS` | agent | built-in list (empty for now) | Extra pinned registry keys (PEM or 64-hex), `;` or `,` separated |
+| `EDGECODER_REGISTRY_PUBLIC_KEYS` | agent, coordinator | built-in list (empty for now) | Extra pinned registry keys (PEM or 64-hex), `;` or `,` separated |
 | `EDGECODER_REGISTRY_URLS` | agent | `<COORDINATOR_URL>/network/registry`, `<PORTAL_URL>/network/registry` | Where the registry is fetched |
 | `EDGECODER_STEERING` | agent | on | `off` disables registry steering |
 | `EDGECODER_STEERING_INTERVAL_MS` | agent | `600000` | How often the agent steers again (minimum 60 s) |

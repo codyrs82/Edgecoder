@@ -8,7 +8,7 @@
 // health check. Enrolled coordinators are never picked by recency or by their DNS records.
 
 import { normalizeCoordinatorUrl } from "../discovery/types.js";
-import type { RegistryPayload } from "../discovery/registry.js";
+import { memberSteerable, type RegistryPayload } from "../discovery/registry.js";
 import { discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 
 export interface PlatformCoordinator {
@@ -18,6 +18,8 @@ export interface PlatformCoordinator {
   /** The registry member's peerId, when it came from the registry. */
   nodeId?: string;
   source: "config" | "registry";
+  /** The registry member's operator (community members carry their operator's user id). */
+  operator?: { id: string; kind: "edgecoder" | "community" };
 }
 
 /** The US and EU seeds; PORTAL_PLATFORM_COORDINATOR_URLS or COORDINATOR_DISCOVERY_URLS override it. */
@@ -106,18 +108,75 @@ export interface PlatformPickerOptions {
   probe: (url: string) => Promise<boolean>;
   /** The signed registry, when wired: used only while it is configured (a signing key is set). */
   registry?: () => { configured: boolean; snapshot(): RegistryPayload } | null;
+  /**
+   * Also hand new agents to active community (outside) registry members
+   * (REGISTRY_STEER_OUTSIDE_MEMBERS). Off until outside coordinators can bill; probation members never.
+   */
+  includeOutside?: boolean;
+  /** Caps each outside operator's share of new-agent assignments (used with includeOutside). */
+  shareCap?: OperatorShareCap;
   ttlMs?: number;
   negativeTtlMs?: number;
   now?: () => number;
 }
 
-/** Registry members EdgeCoder runs that the registry's last check found healthy (identity verified). */
-export function verifiedRegistryCoordinators(registry: { configured: boolean; snapshot(): RegistryPayload } | null | undefined): PlatformCoordinator[] {
+/**
+ * Registry members the registry's last check found healthy (identity verified) that may get new
+ * agents: EdgeCoder's own active coordinators, plus active community members when `includeOutside`.
+ */
+export function verifiedRegistryCoordinators(registry: { configured: boolean; snapshot(): RegistryPayload } | null | undefined, includeOutside = false): PlatformCoordinator[] {
   if (!registry?.configured) return [];
   return registry
     .snapshot()
-    .coordinators.filter((c) => c.operator.kind === "edgecoder" && c.health.status === "healthy" && c.urls.length > 0)
-    .map((c) => ({ url: normalizeCoordinatorUrl(c.urls[0]) ?? c.urls[0], region: (c.region || "unknown").toLowerCase(), nodeId: c.peerId, source: "registry" as const }));
+    .coordinators.filter((c) => memberSteerable(c, includeOutside) && c.health.status === "healthy" && c.urls.length > 0)
+    .map((c) => ({
+      url: normalizeCoordinatorUrl(c.urls[0]) ?? c.urls[0],
+      region: (c.region || "unknown").toLowerCase(),
+      nodeId: c.peerId,
+      source: "registry" as const,
+      operator: { id: c.operator.id, kind: c.operator.kind }
+    }));
+}
+
+/**
+ * Each outside operator's share of new-agent assignments over a rolling window. An operator at or
+ * above `maxShare` of the window's assignments is skipped (once the window holds `minSample`
+ * assignments, so the first few do not lock everyone out). EdgeCoder's own are not counted against.
+ */
+export class OperatorShareCap {
+  private readonly events: Array<{ atMs: number; operatorId: string | null }> = [];
+  constructor(
+    private readonly maxShare: number,
+    private readonly windowMs = 60 * 60_000,
+    private readonly minSample = 20,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  private prune(): void {
+    const cutoff = this.now() - this.windowMs;
+    while (this.events.length > 0 && this.events[0].atMs < cutoff) this.events.shift();
+    if (this.events.length > 50_000) this.events.splice(0, this.events.length - 50_000);
+  }
+
+  /** Whether one more assignment may go to this outside operator. */
+  allows(operatorId: string): boolean {
+    this.prune();
+    const total = this.events.length;
+    if (total < this.minSample) return true;
+    const mine = this.events.filter((e) => e.operatorId === operatorId).length;
+    return (mine + 1) / (total + 1) <= this.maxShare;
+  }
+
+  /** Count an assignment (null: an EdgeCoder coordinator). */
+  record(operatorId: string | null): void {
+    this.events.push({ atMs: this.now(), operatorId });
+    this.prune();
+  }
+
+  share(operatorId: string): number {
+    this.prune();
+    return this.events.length ? this.events.filter((e) => e.operatorId === operatorId).length / this.events.length : 0;
+  }
 }
 
 /**
@@ -152,7 +211,7 @@ export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (a
   };
 
   return async (agent) => {
-    const fromRegistry = verifiedRegistryCoordinators(opts.registry?.() ?? null);
+    const fromRegistry = verifiedRegistryCoordinators(opts.registry?.() ?? null, opts.includeOutside === true);
     const candidates = opts.coordinators.map((c) => ({ ...c }));
     for (const r of fromRegistry) {
       const same = candidates.find((c) => c.url === r.url);
@@ -163,8 +222,14 @@ export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (a
     const region = regionForCountry(agent.countryCode) ?? (agent.region ? agent.region.trim().toLowerCase() || null : null);
     const ordered = region ? [...candidates.filter((c) => c.region === region), ...candidates.filter((c) => c.region !== region)] : candidates;
     const registryUrls = new Set(fromRegistry.map((r) => r.url));
-    const results = await Promise.all(ordered.map((c) => (registryUrls.has(c.url) ? Promise.resolve(true) : healthy(c.url))));
+    const outside = (c: PlatformCoordinator) => c.operator?.kind === "community";
+    // An outside operator over its share is skipped this time (its candidates stay for later picks).
+    const allowed = ordered.filter((c) => !outside(c) || !opts.shareCap || opts.shareCap.allows(c.operator!.id));
+    const results = await Promise.all(allowed.map((c) => (registryUrls.has(c.url) ? Promise.resolve(true) : healthy(c.url))));
     const index = results.findIndex(Boolean);
-    return index >= 0 ? { ...ordered[index] } : null;
+    if (index < 0) return null;
+    const pick = allowed[index];
+    opts.shareCap?.record(outside(pick) ? pick.operator!.id : null);
+    return { ...pick };
   };
 }

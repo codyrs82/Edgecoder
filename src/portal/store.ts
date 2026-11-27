@@ -6,6 +6,7 @@ import type { SecurityResearchEntitlement } from "./security-research.js";
 import type { Pool } from "pg";
 import { createPgPool } from "../db/pool.js";
 import { migrateCloudBots } from "./cloud-bots/store.js";
+import { migrateCoordinatorRegistry } from "./coordinator-registry-store.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
 import { ChatCipher, messageAad, titleAad } from "./chat-crypto.js";
@@ -401,6 +402,8 @@ export class PortalStore {
     await this.migrateOnboarding();
     // Cloud bots (src/portal/cloud-bots/store.ts): bots, their conversations and their runs. New tables, owner approval needed.
     await migrateCloudBots(this.pool);
+    // The signed coordinator registry's members and append-only audit chain (coordinator-registry-store.ts).
+    await migrateCoordinatorRegistry(this.pool);
   }
 
   /**
