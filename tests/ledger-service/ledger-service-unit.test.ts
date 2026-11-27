@@ -60,10 +60,11 @@ describe("ledger service client", () => {
   afterEach(() => setRemoteLedger(null));
 
   it("bills through LEDGER_SERVICE_URL, or the platform URL in production without a database", () => {
-    expect(ledgerServiceUrlFromEnv({ LEDGER_SERVICE_URL: "https://seed.example" })).toBe("https://seed.example");
-    expect(ledgerServiceUrlFromEnv({ NODE_ENV: "production" })).toBe("https://coordinator.edgecoder.io");
-    expect(ledgerServiceUrlFromEnv({ NODE_ENV: "production", DATABASE_URL: "postgres://x" })).toBeNull();
-    expect(ledgerServiceUrlFromEnv({})).toBeNull();
+    const platform = "https://platform.example";
+    expect(ledgerServiceUrlFromEnv({ LEDGER_SERVICE_URL: "https://seed.example" }, platform)).toBe("https://seed.example");
+    expect(ledgerServiceUrlFromEnv({ NODE_ENV: "production" }, platform)).toBe(platform);
+    expect(ledgerServiceUrlFromEnv({ NODE_ENV: "production", DATABASE_URL: "postgres://x" }, platform)).toBeNull();
+    expect(ledgerServiceUrlFromEnv({}, platform)).toBeNull();
   });
 
   it("forwards the portal's signed request as the buyer's proof", () => {

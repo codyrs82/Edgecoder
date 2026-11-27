@@ -15,6 +15,7 @@ import { setRemoteLedger } from "../../credits/store.js";
 import { LedgerService, ledgerServiceConfigFromEnv, registerLedgerServiceRoutes } from "../../ledger-service/server.js";
 import { LedgerServiceClient, ledgerServiceUrlFromEnv } from "../../ledger-service/client.js";
 import { rawBodyOf } from "../../security/request-signing.js";
+import { DEFAULT_DISCOVERY_URL } from "../../portal/coordinator-discovery.js";
 import { app, type CoordinatorApp } from "./app.js";
 import { CC, coordinatorKeys, identity, PORTAL_ACTION_KEYS, registryTrust, securityLog } from "./context.js";
 import { ordering } from "./agent-state.js";
@@ -55,7 +56,7 @@ export const ledgerService: LedgerService | null = pgStore
   : null;
 
 /** Where this coordinator bills, when not on its own database (outside coordinators). */
-export const ledgerServiceUrl = ledgerServiceUrlFromEnv({ LEDGER_SERVICE_URL: CC.LEDGER_SERVICE_URL, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV });
+export const ledgerServiceUrl = ledgerServiceUrlFromEnv({ LEDGER_SERVICE_URL: CC.LEDGER_SERVICE_URL, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV }, DEFAULT_DISCOVERY_URL);
 
 /** Install the remote ledger client (outside coordinators) and the seeds' routes and sweep. */
 export function registerLedgerService(coordinatorApp: CoordinatorApp): void {

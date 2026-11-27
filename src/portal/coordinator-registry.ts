@@ -26,6 +26,7 @@ import { z } from "zod";
 import { fingerprintMatches, publicKeyFingerprint, tryPublicKeyFingerprint } from "../security/key-fingerprint.js";
 import { verifyPayload } from "../mesh/peer.js";
 import { normalizeCoordinatorUrl } from "../discovery/types.js";
+import { registerRegistryBillingRoute, setMemberBilling } from "./coordinator-registry-billing.js";
 import type { FetchResponseLike } from "../discovery/selector.js";
 import { newChallengeNonce, verifyIdentityChallenge, IDENTITY_CHALLENGE_PATH } from "../trust/identity-challenge.js";
 import {
@@ -723,32 +724,9 @@ export class CoordinatorRegistryService {
     return saved ? { ok: true, member: saved } : { ok: false, status: 404, error: "not_found" };
   }
 
-  /**
-   * Turn ledger-service billing on or off for a community member (phase 4). Turning it on needs the
-   * owner's passkey assertion for this change (checked by the caller) and a member on probation or
-   * active; it takes effect once the member is active. Turning it off works in any status. The
-   * signed registry carries the flag; seeds read it at their next refresh (and can stop billing for
-   * a member at once on their own: POST /admin/ledger-service/members/disable).
-   */
-  async setBilling(nodeId: string, actorUserId: string, enabled: boolean): Promise<ServiceResult<{ member: StoredMember }>> {
-    await this.load();
-    const cur = this.cache.find((m) => m.nodeId === nodeId);
-    if (!cur) return { ok: false, status: 404, error: "not_found" };
-    if (cur.operatorKind !== "community") return { ok: false, status: 409, error: "platform_coordinator" };
-    if (enabled && cur.status !== "probation" && cur.status !== "active") return { ok: false, status: 409, error: "not_admitted", problems: [cur.status] };
-    if ((cur.billingEnabled === true) === enabled) return { ok: true, member: cur };
-    const now = this.now();
-    const saved = await this.store.transact(nodeId, (row) => {
-      if (!row || (row.billingEnabled === true) === enabled) return { member: null };
-      if (enabled && row.status !== "probation" && row.status !== "active") return { member: null };
-      return {
-        member: { ...row, billingEnabled: enabled, updatedAtMs: now },
-        audit: this.audit(actorUserId, enabled ? "billing_enabled" : "billing_disabled", nodeId, { status: row.status, ...(enabled ? { confirmedWith: "passkey" } : {}) })
-      };
-    });
-    await this.load();
-    if (!saved || (saved.billingEnabled === true) !== enabled) return { ok: false, status: 409, error: "changed_concurrently" };
-    return { ok: true, member: saved };
+  /** Ledger-service billing on or off for a community member (coordinator-registry-billing.ts). */
+  setBilling(nodeId: string, actorUserId: string, enabled: boolean): Promise<ServiceResult<{ member: StoredMember }>> {
+    return setMemberBilling(this, nodeId, actorUserId, enabled, this.now());
   }
 
   /**
@@ -958,29 +936,7 @@ export function registerRegistryRoutes(app: FastifyInstance, { service, requireA
     return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
   });
 
-  app.post("/admin/network/registry/billing", async (req, reply) => {
-    const admin = await requireAdmin(req, reply);
-    if (!admin) return;
-    const body = z
-      .object({
-        nodeId: z.string().min(1).max(256),
-        enabled: z.boolean(),
-        challengeId: z.string().min(10).max(64).optional(),
-        credentialId: z.string().max(1024).optional(),
-        response: z.unknown().optional()
-      })
-      .safeParse(req.body ?? {});
-    if (!body.success) return reply.code(400).send({ error: "invalid_request" });
-    if (body.data.enabled) {
-      // Same as an approval: the owner's passkey, asserted for this change.
-      if (!passkey) return reply.code(503).send({ error: "passkeys_not_configured" });
-      if (!body.data.challengeId || body.data.response === undefined) return reply.code(403).send({ error: "passkey_required", detail: "Confirm billing with your passkey." });
-      const v = await passkey.verify(admin, { challengeId: body.data.challengeId, credentialId: body.data.credentialId, response: body.data.response });
-      if (!v.ok) return reply.code(v.status).send({ error: v.error });
-    }
-    const r = await service.setBilling(body.data.nodeId, admin.userId, body.data.enabled);
-    return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
-  });
+  registerRegistryBillingRoute(app, { service, requireAdmin, passkey, view: memberView });
 
   app.post("/admin/network/registry/suspend", async (req, reply) => {
     const admin = await requireAdmin(req, reply);

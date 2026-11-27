@@ -102,9 +102,9 @@ export class LedgerServiceClient {
  * when set; in production a coordinator with no DATABASE_URL has no billing of its own and bills
  * through the platform URL.
  */
-export function ledgerServiceUrlFromEnv(env: { LEDGER_SERVICE_URL?: string; DATABASE_URL?: string; NODE_ENV?: string }): string | null {
+export function ledgerServiceUrlFromEnv(env: { LEDGER_SERVICE_URL?: string; DATABASE_URL?: string; NODE_ENV?: string }, platformUrl: string): string | null {
   const url = env.LEDGER_SERVICE_URL?.trim();
   if (url) return url;
-  if (!env.DATABASE_URL?.trim() && env.NODE_ENV === "production") return "https://coordinator.edgecoder.io";
+  if (!env.DATABASE_URL?.trim() && env.NODE_ENV === "production") return platformUrl;
   return null;
 }
