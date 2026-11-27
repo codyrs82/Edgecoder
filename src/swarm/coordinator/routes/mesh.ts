@@ -19,6 +19,13 @@ import { setNudgeTransport } from "../dispatch.js";
 import { noteAgentSocketClosed, noteAgentSocketOpen } from "../agent-liveness.js";
 import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
+import { coordinatorPlace } from "../coordinator-region.js";
+
+/** Region and country for GET /identity (only the ones known). */
+function identityPlace(): { region?: string; country?: string } {
+  const p = coordinatorPlace();
+  return { ...(p.region ? { region: p.region } : {}), ...(p.country ? { country: p.country } : {}) };
+}
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
 import { coordinatorDrain, type DrainSocket } from "../drain.js";
 import {
@@ -558,6 +565,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     trustEntry: `${identity.peerId}:${IDENTITY_FINGERPRINT}`,
     legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem),
     responseSigning: RESPONSE_SIGNING_VERSION,
+    // Where it runs (../coordinator-region.ts): peers show it on the world view, also while its view is out of reach.
+    ...identityPlace(),
     // Stopping for a deploy or restart: agents' steering picks another coordinator meanwhile (#524).
     ...(coordinatorDrain.draining ? { draining: true } : {})
   }));

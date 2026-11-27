@@ -302,3 +302,152 @@ describe("bounds", () => {
     expect(body.agents.length).toBeLessThanOrEqual(500);
   });
 });
+
+describe("outside coordinators: region, round trip and a slow answer", () => {
+  test("/identity and /network/world/local carry the configured region, else the looked-up one", async () => {
+    const region = await import("../../src/swarm/coordinator/coordinator-region.js");
+    const saved = { cr: process.env.COORDINATOR_REGION, fly: process.env.FLY_REGION };
+    delete process.env.FLY_REGION;
+    try {
+      process.env.COORDINATOR_REGION = "JNB";
+      route.clearWorldLocalCache();
+      expect((await get("/identity")).json()).toMatchObject({ region: "jnb", country: "ZA" });
+      expect((await get("/network/world/local", { "x-mesh-token": MESH })).json().coordinator).toMatchObject({ region: "jnb", country: "ZA", continent: "AF" });
+
+      delete process.env.COORDINATOR_REGION;
+      region.setLookedUpRegion({ region: "sin", countryCode: "SG" });
+      route.clearWorldLocalCache();
+      expect((await get("/identity")).json()).toMatchObject({ region: "sin", country: "SG" });
+      expect((await get("/network/world/local", { "x-mesh-token": MESH })).json().coordinator).toMatchObject({ region: "sin", country: "SG", continent: "AS" });
+
+      region.setLookedUpRegion(null);
+      const bare = (await get("/identity")).json();
+      expect(bare.region).toBeUndefined();
+      expect(bare.country).toBeUndefined();
+    } finally {
+      region.setLookedUpRegion(null);
+      if (saved.cr === undefined) delete process.env.COORDINATOR_REGION;
+      else process.env.COORDINATOR_REGION = saved.cr;
+      if (saved.fly !== undefined) process.env.FLY_REGION = saved.fly;
+      route.clearWorldLocalCache();
+    }
+  });
+
+  test("a peer whose view cannot be fetched still shows the region and round trip its /identity gave", async () => {
+    const peerKeys = createPeerKeys("coord-sin-probe");
+    (ctx.mesh as any).peers.set(peerKeys.peerId, { peerId: peerKeys.peerId, publicKeyPem: peerKeys.publicKeyPem, coordinatorUrl: "https://sin.coord.example", networkMode: "public_mesh" });
+    route.setWorldPeerFetch(async () => {
+      throw new Error("timeout");
+    });
+    const asked: string[] = [];
+    route.setPeerProbeFetch(async (url) => {
+      asked.push(url);
+      return { status: 200, json: { peerId: peerKeys.peerId, region: "sin", country: "SG" } };
+    });
+    try {
+      let t = 1_000;
+      // The first GET opens the connection; only the second is timed (106 ms on this clock).
+      const ms = await route.probePeer({ peerId: peerKeys.peerId, url: "https://sin.coord.example" }, () => (t += 106));
+      expect(ms).toBe(106);
+      expect(asked).toEqual(["https://sin.coord.example/identity", "https://sin.coord.example/identity"]);
+      const body = (await get("/network/world", { "x-portal-service-token": PORTAL })).json();
+      expect(body.coordinators.find((c: any) => c.id === peerKeys.peerId)).toMatchObject({ reachable: false, region: "sin", country: "SG", continent: "AS" });
+      expect(body.links.find((l: any) => l.to === peerKeys.peerId || l.from === peerKeys.peerId)?.rttMs).toBe(106);
+    } finally {
+      route.setWorldPeerFetch(null);
+      route.setPeerProbeFetch(null);
+      ctx.mesh.removePeer(peerKeys.peerId);
+    }
+  });
+
+  test("a probe answered by another coordinator (wrong peer id) or with an error records nothing", async () => {
+    route.setPeerProbeFetch(async () => ({ status: 200, json: { peerId: "someone-else", region: "ord" } }));
+    try {
+      expect(await route.probePeer({ peerId: "coord-x", url: "https://x.coord.example" })).toBeNull();
+      expect(route.peerProbeRtt.rttMs("coord-x", Date.now())).toBeNull();
+      route.setPeerProbeFetch(async () => ({ status: 500, json: null }));
+      expect(await route.probePeer({ peerId: "coord-x", url: "https://x.coord.example" })).toBeNull();
+      route.setPeerProbeFetch(async () => {
+        throw new Error("ECONNRESET");
+      });
+      expect(await route.probePeer({ peerId: "coord-x", url: "https://x.coord.example" })).toBeNull();
+    } finally {
+      route.setPeerProbeFetch(null);
+    }
+  });
+
+  test("one failed or slow fetch keeps the peer's last view on the map, up to WORLD_PEER_ROUTING_STALE_MS", async () => {
+    const peerKeys = createPeerKeys("coord-flaky");
+    (ctx.mesh as any).peers.set(peerKeys.peerId, { peerId: peerKeys.peerId, publicKeyPem: peerKeys.publicKeyPem, coordinatorUrl: "https://flaky.coord.example", networkMode: "public_mesh" });
+    let up = true;
+    route.setWorldPeerFetch(async () => {
+      if (!up) throw new Error("ETIMEDOUT");
+      return {
+        status: 200,
+        json: { coordinator: { id: peerKeys.peerId, url: "https://flaky.coord.example", region: "sin", country: "SG", continent: "AS", agents: 0, agentsOnline: 0 }, links: [], agents: [], generatedAtMs: Date.now() }
+      };
+    });
+    try {
+      const t0 = Date.now();
+      const find = (w: any) => w.coordinators.find((c: any) => c.id === peerKeys.peerId);
+      expect(find(await route.worldView(null, t0))).toMatchObject({ reachable: true, region: "sin" });
+      up = false;
+      expect(find(await route.worldView(null, t0 + route.WORLD_PEER_CACHE_MS + 1_000))).toMatchObject({ reachable: true, region: "sin" });
+      // Too long without an answer: unreachable, but still in its region.
+      expect(find(await route.worldView(null, t0 + route.WORLD_PEER_ROUTING_STALE_MS + route.WORLD_PEER_CACHE_MS + 2_000))).toMatchObject({ reachable: false, region: "sin" });
+    } finally {
+      route.setWorldPeerFetch(null);
+      ctx.mesh.removePeer(peerKeys.peerId);
+    }
+  });
+});
+
+describe("coordinator region lookup (coordinator-region.ts)", () => {
+  test("a configured region wins and skips the lookup; otherwise the address is looked up, retried on failure", async () => {
+    const region = await import("../../src/swarm/coordinator/coordinator-region.js");
+    expect(region.configuredCoordinatorRegion({ COORDINATOR_REGION: " JNB " } as NodeJS.ProcessEnv, "")).toBe("jnb");
+    expect(region.configuredCoordinatorRegion({ FLY_REGION: "sin" } as NodeJS.ProcessEnv, "")).toBe("sin");
+    expect(region.configuredCoordinatorRegion({ FLY_REGION: "sin" } as NodeJS.ProcessEnv, "ord")).toBe("ord");
+    expect(region.configuredCoordinatorRegion({} as NodeJS.ProcessEnv, "")).toBeNull();
+
+    const saved = { cr: process.env.COORDINATOR_REGION, fly: process.env.FLY_REGION };
+    delete process.env.FLY_REGION;
+    try {
+      process.env.COORDINATOR_REGION = "cdg";
+      let asked = 0;
+      region.startCoordinatorRegionLookup({ fetchGeo: async () => (asked++, { status: 200, json: {} }) })();
+      expect(asked).toBe(0);
+      delete process.env.COORDINATOR_REGION;
+      region.startCoordinatorRegionLookup({ enabled: false, fetchGeo: async () => (asked++, { status: 200, json: {} }) })();
+      expect(asked).toBe(0);
+
+      // Two failures, then the Azure South Africa North address.
+      const answers = [
+        async () => ({ status: 503, json: null }),
+        async (): Promise<{ status: number; json: unknown }> => {
+          throw new Error("ETIMEDOUT");
+        },
+        async () => ({ status: 200, json: { ip: "4.168.235.184", country: "South Africa", lat: -26.20227, lon: 28.04363 } })
+      ];
+      const urls: string[] = [];
+      const stop = region.startCoordinatorRegionLookup({ retryMs: 5, fetchGeo: async (url) => (urls.push(url), answers[urls.length - 1]()) });
+      await expect.poll(() => region.coordinatorRegion(), { timeout: 2_000 }).toBe("jnb");
+      stop();
+      expect(urls).toEqual([region.REGION_LOOKUP_URL, region.REGION_LOOKUP_URL, region.REGION_LOOKUP_URL]);
+      expect(region.coordinatorPlace()).toEqual({ region: "jnb", country: "ZA", continent: "AF" });
+
+      // Gives up after maxTries.
+      region.setLookedUpRegion(null);
+      let tries = 0;
+      region.startCoordinatorRegionLookup({ retryMs: 1, maxTries: 3, fetchGeo: async () => (tries++, { status: 500, json: null }) });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(tries).toBe(3);
+      expect(region.coordinatorRegion()).toBeNull();
+    } finally {
+      region.setLookedUpRegion(null);
+      if (saved.cr === undefined) delete process.env.COORDINATOR_REGION;
+      else process.env.COORDINATOR_REGION = saved.cr;
+      if (saved.fly !== undefined) process.env.FLY_REGION = saved.fly;
+    }
+  });
+});

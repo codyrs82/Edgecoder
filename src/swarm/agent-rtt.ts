@@ -80,6 +80,12 @@ export class RttTracker {
     this.pending.delete(id);
   }
 
+  /** Forget every figure (tests). */
+  clear(): void {
+    this.pending.clear();
+    this.stats.clear();
+  }
+
   get size(): number {
     return this.stats.size;
   }

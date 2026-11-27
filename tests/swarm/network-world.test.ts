@@ -5,7 +5,9 @@ import {
   WORLD_MAX_MODELS_PER_AGENT,
   localWorldAgent,
   maskedId,
+  nearestRegion,
   osFamily,
+  regionFromGeo,
   parseLocalWorld,
   regionInfo,
   toPublicWorld,
@@ -281,5 +283,61 @@ describe("agents known to two coordinators", () => {
     expect(pub.agents).toHaveLength(1);
     expect(pub.agents[0]).toMatchObject({ mine: true, name: "ec-st6-fra", coordinatorId: "coord-eu" });
     expect(pub.totals.mine).toBe(1);
+  });
+});
+
+describe("outside coordinators (signature-only peers on Fly sin and Azure jnb)", () => {
+  it("names the region of a geolocated coordinator from its coordinates, and none when it is far from every region", () => {
+    expect(nearestRegion(1.29, 103.85)).toBe("sin");
+    expect(nearestRegion(-26.2, 28.04)).toBe("jnb");
+    expect(nearestRegion(32.65, -97.33)).toBe("dfw");
+    // Nairobi: Johannesburg is ~2,900 km away, too far to name.
+    expect(nearestRegion(-1.29, 36.82)).toBeNull();
+    expect(nearestRegion(Number.NaN, 0)).toBeNull();
+    expect(nearestRegion(95, 0)).toBeNull();
+  });
+
+  it("reads a geolocation answer (keyless and full shapes) into a region code and a country", () => {
+    // The keyless api.ipapi.is answer for the Azure South Africa North address.
+    expect(regionFromGeo({ ip: "4.168.235.184", city: "Johannesburg", country: "South Africa", lat: -26.20227, lon: 28.04363 })).toEqual({ region: "jnb", countryCode: "ZA" });
+    expect(regionFromGeo({ location: { latitude: 1.35, longitude: 103.82, country_code: "sg" } })).toEqual({ region: "sin", countryCode: "SG" });
+    expect(regionFromGeo({ country: "Kenya", lat: -1.29, lon: 36.82 })).toEqual({ region: null, countryCode: "KE" });
+    expect(regionFromGeo(null)).toEqual({ region: null, countryCode: null });
+    expect(regionFromGeo("nope")).toEqual({ region: null, countryCode: null });
+  });
+
+  it("an unreachable peer keeps the region it gave at /identity, and a reachable one whose view names none takes it too", () => {
+    const self = world("coord-us", "https://coordinator.example", []);
+    const sinPlace = regionInfo("sin", null);
+    const jnbPlace = regionInfo("jnb", null);
+    const old = world("coord-jnb-azure", "https://jnb.example", [facts("ec-st9-jnb-host", { region: "jnb", countryCode: "ZA" })]);
+    old.coordinator = { ...old.coordinator, region: null, country: null, continent: null };
+    const view = toPublicWorld(
+      self,
+      [
+        { url: "https://sin.example", id: "coord-sin-fly", world: null, rttMs: 212, place: sinPlace },
+        { url: "https://jnb.example", id: "coord-jnb-azure", world: old, rttMs: 238, place: jnbPlace }
+      ],
+      null,
+      NOW
+    );
+    const by = Object.fromEntries(view.coordinators.map((c) => [c.id, c]));
+    expect(by["coord-sin-fly"]).toMatchObject({ reachable: false, region: "sin", country: "SG", continent: "AS", agents: 0 });
+    expect(by["coord-jnb-azure"]).toMatchObject({ reachable: true, region: "jnb", country: "ZA", continent: "AF", agents: 1 });
+    expect(view.links.find((l) => l.to === "coord-sin-fly")?.rttMs).toBe(212);
+    expect(view.links.find((l) => l.to === "coord-jnb-azure")?.rttMs).toBe(238);
+    // The region a peer reports in its own view wins over the hint.
+    const own = toPublicWorld(self, [{ url: "https://x.example", id: "coord-x", world: world("coord-x", "https://x.example", []), rttMs: null, place: sinPlace }], null, NOW);
+    expect(own.coordinators[1].region).toBe("iad");
+  });
+
+  it("marks your machine as yours on an outside coordinator, by its owner tag", () => {
+    const self = world("coord-us", "https://coordinator.example", [facts("someone-else", { ownerAccountId: "acct-other" })]);
+    const outside = world("coord-jnb-azure", "https://jnb.example", [facts("maw-mb-02", { ownerAccountId: "acct-maw", os: "linux", region: "jnb", countryCode: "ZA" })]);
+    const view = toPublicWorld(self, [{ url: "https://jnb.example", id: "coord-jnb-azure", world: outside, rttMs: 240 }], "acct-maw", NOW);
+    const mine = view.agents.filter((a) => a.mine);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ name: "maw-mb-02", coordinatorId: "coord-jnb-azure", region: "jnb" });
+    expect(view.totals.mine).toBe(1);
   });
 });

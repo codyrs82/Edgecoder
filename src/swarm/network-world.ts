@@ -32,6 +32,7 @@
  */
 import { createHash, createHmac } from "node:crypto";
 import { networkTag, sanitizeLanAddresses } from "./lan-proximity.js";
+import { parseIpIntelligence } from "../portal/ip-intelligence.js";
 
 export type WorldStatus = "idle" | "busy" | "stale";
 
@@ -286,6 +287,62 @@ export function regionInfo(region: string | null | undefined, countryCode: strin
   return { region: r, country, continent: fly?.[1] ?? (country ? CONTINENT_BY_COUNTRY[country] ?? null : null) };
 }
 
+/**
+ * Where each region code is (its airport, roughly: lat, lon), to name the region of a coordinator
+ * that has no region configured from the geolocation of its public address (coordinator-region.ts).
+ */
+export const REGION_COORDS: Record<string, [number, number]> = {
+  iad: [38.95, -77.45], ord: [41.98, -87.9], lax: [33.94, -118.41], sjc: [37.36, -121.93], sea: [47.45, -122.31], dfw: [32.9, -97.04],
+  den: [39.86, -104.67], ewr: [40.69, -74.17], atl: [33.64, -84.43], mia: [25.8, -80.29], bos: [42.36, -71.01], phx: [33.43, -112.01],
+  yyz: [43.68, -79.63], yul: [45.47, -73.74], qro: [20.59, -100.39], gru: [-23.43, -46.47], gig: [-22.81, -43.25], scl: [-33.39, -70.79],
+  eze: [-34.82, -58.54], bog: [4.7, -74.15], lhr: [51.47, -0.45], ams: [52.31, 4.76], fra: [50.03, 8.57], cdg: [49.01, 2.55],
+  mad: [40.47, -3.56], arn: [59.65, 17.92], waw: [52.17, 20.97], otp: [44.57, 26.1], sin: [1.36, 103.99], nrt: [35.77, 140.39],
+  hkg: [22.31, 113.91], bom: [19.09, 72.87], syd: [-33.94, 151.18], jnb: [-26.13, 28.24]
+};
+/** A geolocated coordinator further than this from every known region gets no region code (its country still shows). */
+export const REGION_MATCH_MAX_KM = 800;
+
+/** Great-circle distance, km. */
+export function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** The region code nearest to (lat, lon), or null when none is within `maxKm`. */
+export function nearestRegion(lat: number, lon: number, maxKm = REGION_MATCH_MAX_KM): string | null {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  let best: string | null = null;
+  let bestKm = Infinity;
+  for (const [code, [rlat, rlon]] of Object.entries(REGION_COORDS)) {
+    const km = distanceKm(lat, lon, rlat, rlon);
+    if (km < bestKm) {
+      best = code;
+      bestKm = km;
+    }
+  }
+  return bestKm <= maxKm ? best : null;
+}
+
+/**
+ * Region code and country from a geolocation answer for this machine's own address (api.ipapi.is,
+ * either shape: `lat`/`lon` at the top, or `location.latitude`/`location.longitude`).
+ */
+export function regionFromGeo(payload: unknown): { region: string | null; countryCode: string | null } {
+  if (!payload || typeof payload !== "object") return { region: null, countryCode: null };
+  const p = payload as { lat?: unknown; lon?: unknown; location?: { latitude?: unknown; longitude?: unknown } };
+  const num = (...vs: unknown[]) => vs.find((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const lat = num(p.lat, p.location?.latitude);
+  const lon = num(p.lon, p.location?.longitude);
+  const region = lat !== undefined && lon !== undefined ? nearestRegion(lat, lon) : null;
+  return { region, countryCode: parseIpIntelligence(payload).countryCode ?? null };
+}
+
+/** A coordinator's place as the world view shows it. */
+export type CoordinatorPlace = { region: string | null; country: string | null; continent: string | null };
+
 // ── Building and merging ──
 
 /** The live facts about one agent the coordinator already keeps. */
@@ -375,7 +432,11 @@ const REQUEST_ORDER: Record<WorldRequestState, number> = { streaming: 0, startin
  */
 export function toPublicWorld(
   self: LocalWorld,
-  peers: Array<{ url: string; id?: string; world: LocalWorld | null; rttMs: number | null }>,
+  /**
+   * `place`: what is known of the peer's region apart from its view (its /identity, or its last
+   * good view); shown for a peer that could not be reached, or one whose view names none.
+   */
+  peers: Array<{ url: string; id?: string; world: LocalWorld | null; rttMs: number | null; place?: CoordinatorPlace | null }>,
   callerAccountId: string | null,
   nowMs: number,
   /**
@@ -424,13 +485,16 @@ export function toPublicWorld(
   for (const p of peers.slice(0, WORLD_MAX_COORDINATORS - 1)) {
     const id = p.world?.coordinator.id ?? p.id ?? p.url;
     if (coordinators.some((c) => c.id === id)) continue;
+    const place = p.place ?? null;
     if (p.world) {
-      coordinators.push({ ...p.world.coordinator, url: p.world.coordinator.url || p.url, reachable: true, self: false });
+      const c = p.world.coordinator;
+      const own = c.region || c.country ? { region: c.region, country: c.country, continent: c.continent } : place ?? { region: null, country: null, continent: null };
+      coordinators.push({ ...c, ...own, url: c.url || p.url, reachable: true, self: false });
       p.world.links.forEach((l) => addLink(l, p.world!.coordinator.id));
       p.world.agents.forEach(take);
       takeRequests(p.world);
     } else {
-      coordinators.push({ id, url: p.url, region: null, country: null, continent: null, agents: 0, agentsOnline: 0, reachable: false, self: false });
+      coordinators.push({ id, url: p.url, region: place?.region ?? null, country: place?.country ?? null, continent: place?.continent ?? null, agents: 0, agentsOnline: 0, reachable: false, self: false });
     }
     addLink({ from: self.coordinator.id, to: id, rttMs: p.rttMs });
   }

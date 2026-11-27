@@ -39,6 +39,8 @@ import { isApprovedCoordinator } from "../peers.js";
 import { parsePeerUrlPins } from "../../../mesh/peer-trust.js";
 import { routableModels } from "../../model-catalog.js";
 import { meshRtt } from "./mesh.js";
+import { RttTracker } from "../../agent-rtt.js";
+import { coordinatorPlace, startCoordinatorRegionLookup } from "../coordinator-region.js";
 import { accountsFor } from "./admin-network.js";
 import { agentPerf, setPeerWorldSource } from "../routing.js";
 import { inferenceStreams } from "./inference.js";
@@ -52,6 +54,7 @@ import {
   parseLocalWorld,
   worldOwnerTag,
   regionInfo,
+  type CoordinatorPlace,
   toPublicWorld,
   withRegistryStatus,
   worldMaskKey,
@@ -73,12 +76,9 @@ export const WORLD_PEER_TIMEOUT_MS = 3_000;
  */
 export const WORLD_PEER_ROUTING_STALE_MS = 60_000;
 export const WORLD_RATE_PER_MIN = 30;
+export const WORLD_PEER_PROBE_TIMEOUT_MS = 5_000;
 
 const maskKey = worldMaskKey(coordinatorKeys.privateKeyPem);
-
-function coordinatorRegion(): string | null {
-  return CC.INFRA_HOST_REGION || process.env.COORDINATOR_REGION || process.env.FLY_REGION || null;
-}
 
 /** Pinned peers from MESH_PEER_ALLOWLIST (`peerId:fp@url`): operator configuration, so they are listed even before they register. */
 const ALLOWLIST_PINS = (() => {
@@ -127,13 +127,66 @@ export function peerCoordinators(pins: ReadonlyMap<string, string> = worldPins()
   return out;
 }
 
-/** Round trip to a peer coordinator: its mesh socket's pings, else the last timed view fetch. */
+/**
+ * Round trip to a peer coordinator: its mesh socket's pings, else the timed /identity probe
+ * (probePeers: every peer, including one admitted by its signature alone, which holds no mesh
+ * socket here and whose view may never be asked for), else the last timed view fetch.
+ */
 const peerFetchMs = new Map<string, { ms: number; atMs: number }>();
+export const peerProbeRtt = new RttTracker(1_000);
 function linkRtt(peerId: string, nowMs: number): number | null {
   const ws = meshRtt.rttMs(peerId, nowMs);
-  if (ws !== null) return ws;
+  if (ws !== null) return Math.round(ws);
+  const probed = peerProbeRtt.rttMs(peerId, nowMs);
+  if (probed !== null) return Math.round(probed);
   const f = peerFetchMs.get(peerId);
   return f && nowMs - f.atMs < 5 * 60_000 ? f.ms : null;
+}
+
+/** Where each peer says it is (its GET /identity), for the world view when its own view is missing. */
+const peerPlace = new Map<string, CoordinatorPlace>();
+
+export type PeerProbeFetch = (url: string, timeoutMs: number) => Promise<{ status: number; json: unknown }>;
+const undiciProbeFetch: PeerProbeFetch = async (url, timeoutMs) => {
+  const res = await request(url, { method: "GET", headers: { accept: "application/json" }, headersTimeout: timeoutMs, bodyTimeout: timeoutMs, signal: AbortSignal.timeout(timeoutMs) });
+  const text = await res.body.text();
+  if (text.length > 64 * 1024) return { status: 502, json: null };
+  return { status: res.statusCode, json: text ? JSON.parse(text) : null };
+};
+let probeFetch: PeerProbeFetch = undiciProbeFetch;
+/** Tests: replace how peers' /identity is fetched (null: the real one). Clears what was probed. */
+export function setPeerProbeFetch(f: PeerProbeFetch | null): void {
+  probeFetch = f ?? undiciProbeFetch;
+  peerPlace.clear();
+  peerProbeRtt.clear();
+}
+
+/**
+ * Time one peer's public GET /identity, twice: the first may open the connection (TCP and TLS),
+ * the second runs on the warm one, so its time is the network round trip. The answer must name
+ * the peer id the mesh knows at that URL; its region (and country) is kept for the world view.
+ */
+export async function probePeer(peer: { peerId: string; url: string }, now: () => number = () => performance.now()): Promise<number | null> {
+  const url = `${peer.url}/identity`;
+  try {
+    await probeFetch(url, WORLD_PEER_PROBE_TIMEOUT_MS);
+    const started = now();
+    const r = await probeFetch(url, WORLD_PEER_PROBE_TIMEOUT_MS);
+    const ms = Math.max(0, now() - started);
+    const j = (r.json ?? {}) as Record<string, unknown>;
+    if (r.status !== 200 || j.peerId !== peer.peerId) return null;
+    peerProbeRtt.record(peer.peerId, ms, Date.now());
+    const place = regionInfo(typeof j.region === "string" ? j.region.toLowerCase() : null, typeof j.country === "string" ? j.country : null);
+    if (place.region || place.country) peerPlace.set(peer.peerId, place);
+    return Math.round(ms);
+  } catch {
+    return null;
+  }
+}
+
+/** Probe every peer coordinator once (in parallel). */
+export async function probePeers(): Promise<void> {
+  await Promise.all(peerCoordinators().map((p) => probePeer(p)));
 }
 
 let localCache: { atMs: number; value: Promise<LocalWorld> } | null = null;
@@ -186,12 +239,11 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
     // For peers' best-fit routing (stripped from every public answer).
     return { ...agent, perf: agentPerf(agentId, claims) };
   });
-  const region = regionInfo(coordinatorRegion(), null);
   return {
     coordinator: {
       id: identity.peerId,
       url: CC.COORDINATOR_PUBLIC_URL,
-      ...region,
+      ...coordinatorPlace(),
       agents: agents.length,
       agentsOnline: agents.filter((a) => a.status !== "stale").length
     },
@@ -285,13 +337,24 @@ function peerWorldForRouting(peer: { peerId: string; url: string }, nowMs: numbe
   return value;
 }
 
-/** The public world view for one caller (null account: nothing is marked as theirs). */
+/**
+ * The public world view for one caller (null account: nothing is marked as theirs). A peer whose
+ * fetch failed this time but answered within WORLD_PEER_ROUTING_STALE_MS keeps its last view (one
+ * slow answer does not grey it out); otherwise it is listed unreachable, with the region it gave
+ * at /identity or in its last good view.
+ */
 export async function worldView(callerAccountId: string | null, nowMs = Date.now(), lanFor?: { callerNetTag: string | null }): Promise<PublicWorld> {
   const peers = peerCoordinators();
   const [self, ...views] = await Promise.all([cachedLocalWorld(nowMs), ...peers.map((p) => fetchPeerWorld(p, nowMs))]);
   const world = toPublicWorld(
     self,
-    peers.map((p, i) => ({ url: p.url, id: p.peerId, world: views[i], rttMs: linkRtt(p.peerId, nowMs) })),
+    peers.map((p, i) => {
+      const last = peerLastGood.get(p.peerId);
+      const world = views[i] ?? (last && nowMs - last.atMs <= WORLD_PEER_ROUTING_STALE_MS ? last.world : null);
+      const c = last?.world.coordinator;
+      const place = peerPlace.get(p.peerId) ?? (c && (c.region || c.country) ? { region: c.region, country: c.country, continent: c.continent } : null);
+      return { url: p.url, id: p.peerId, world, rttMs: linkRtt(p.peerId, nowMs), place };
+    }),
     callerAccountId,
     nowMs,
     lanFor
@@ -337,6 +400,18 @@ async function peerWorldsForRouting(nowMs: number): Promise<Array<{ world: Local
 export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
   setPeerWorldSource(peerWorldsForRouting, (agentId) => meshRtt.rttMs(agentId, Date.now()));
   queue.onClaimed((agentId) => agentCalls.record(agentId));
+  // Background work only in a running coordinator (never under the test runner): the region lookup
+  // when none is configured, and the peer probes.
+  app.addHook("onReady", async () => {
+    if (process.env.VITEST) return;
+    startCoordinatorRegionLookup({ enabled: CC.COORDINATOR_REGION_LOOKUP, log: app.log });
+    if (CC.WORLD_PEER_PROBE_MS > 0) {
+      const first = setTimeout(() => void probePeers(), 5_000);
+      first.unref?.();
+      const timer = setInterval(() => void probePeers(), CC.WORLD_PEER_PROBE_MS);
+      timer.unref?.();
+    }
+  });
 
   app.get("/network/world/local", async (req, reply) => {
     if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });

@@ -51,19 +51,19 @@ beforeEach(async () => {
 });
 
 describe("networkWorld (src/apps/ide/network-world.ts)", () => {
-  it("asks the forwarder with the IDE token and adds this computer's round trip to each reachable coordinator", async () => {
+  it("asks the forwarder with the IDE token and adds this computer's round trip to every coordinator, reachable from it or not", async () => {
     const { networkWorld } = await import("../../src/apps/ide/network-world.js");
     const probed: string[] = [];
     const r = await networkWorld({ forwarder: base, token: () => "ide-token", agentId: "mac-1" }, async (url) => {
       probed.push(url);
-      return 23;
+      return url === base ? 23 : 241;
     });
     expect(seen[0]).toEqual({ url: "/forward/network/world", auth: "Bearer ide-token" });
     expect(r.status).toBe(200);
     const coords = r.json.coordinators as Array<{ id: string; myRttMs: number | null }>;
-    expect(coords.map((c) => [c.id, c.myRttMs])).toEqual([["coord-us", 23], ["coord-eu", null]]);
-    // The coordinator it could not reach is not probed either.
-    expect(probed).toEqual([base]);
+    // coord-eu is unreachable from the answering coordinator, but this computer's round trip to it is still measured.
+    expect(coords.map((c) => [c.id, c.myRttMs])).toEqual([["coord-us", 23], ["coord-eu", 241]]);
+    expect(probed).toEqual([base, "https://eu.invalid"]);
     expect(r.json.latency).toMatchObject({ measuredFrom: "this computer" });
   });
 

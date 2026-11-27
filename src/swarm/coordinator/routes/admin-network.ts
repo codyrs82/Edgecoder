@@ -29,6 +29,7 @@ import { PostgresRoutingDecisionStore } from "../../../db/routing-decision-store
 import { RoutingHistory } from "../../routing-history.js";
 import { agentMemoryRecord, agentUnavailable, circuitState, memoryLimited, MEMORY_FRESH_MS } from "../memory-admission.js";
 import { accountsFor } from "../agent-accounts.js";
+import { coordinatorRegion } from "../coordinator-region.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
 import { agentContextWindow, agentLastPullMs, agentLoadReport, agentSocketConnected, freeModelSlots, pickupStats } from "../dispatch.js";
@@ -101,12 +102,10 @@ function isConnected(agentId: string, cap: Capability, nowMs: number): boolean {
 }
 
 /**
- * This coordinator's hosting region (e.g. "ord", "cdg"): INFRA_HOST_REGION, COORDINATOR_REGION, then
- * Fly's own FLY_REGION, as in GET /network/world.
+ * This coordinator's hosting region (e.g. "ord", "cdg"): INFRA_HOST_REGION, COORDINATOR_REGION,
+ * Fly's own FLY_REGION, then the geolocation of its address, as in GET /network/world (../coordinator-region.ts).
  */
-export function coordinatorRegion(): string | null {
-  return CC.INFRA_HOST_REGION || process.env.COORDINATOR_REGION || process.env.FLY_REGION || null;
-}
+export { coordinatorRegion };
 
 /** Where an agent runs: the region it reported (AGENT_REGION / FLY_REGION), else its coordinator's. */
 export function agentRegion(cap: Pick<Capability, "region">): string {
