@@ -7,6 +7,8 @@ import {
   clientIpTrustFromEnv,
   isLoopbackAddress,
   isLoopbackSocket,
+  loopbackSelfRegistrationAllowed,
+  untrustedLocalProxy,
   socketRemoteAddress,
   normalizeUrl,
   pairKey,
@@ -130,6 +132,38 @@ describe("loopback detection", () => {
   test("isLoopbackSocket is false for a configured proxy on this host", () => {
     expect(isLoopbackSocket("127.0.0.1")).toBe(true);
     expect(isLoopbackSocket("127.0.0.1", { trustedProxies: ["127.0.0.1"], onFly: false })).toBe(false);
+  });
+
+  test("isLoopbackSocket is false when proxy headers are present, whatever the socket says", () => {
+    for (const h of [
+      { "x-forwarded-for": "198.51.100.7" },
+      { forwarded: "for=198.51.100.7" },
+      { "x-real-ip": "198.51.100.7" },
+      { via: "1.1 Caddy" },
+      { "x-forwarded-for": "127.0.0.1" }
+    ]) {
+      expect(isLoopbackSocket("127.0.0.1", undefined, h)).toBe(false);
+      expect(isLoopbackSocket("::1", undefined, h)).toBe(false);
+    }
+    expect(isLoopbackSocket("127.0.0.1", undefined, { host: "127.0.0.1:4301" })).toBe(true);
+  });
+
+  test("untrustedLocalProxy: relayed loopback requests with no COORDINATOR_TRUST_PROXY", () => {
+    const none = { trustedProxies: [], onFly: false };
+    expect(untrustedLocalProxy("127.0.0.1", { "x-forwarded-for": "198.51.100.7" }, none)).toBe(true);
+    expect(untrustedLocalProxy("127.0.0.1", {}, none)).toBe(false);
+    expect(untrustedLocalProxy("203.0.113.9", { via: "1.1 x" }, none)).toBe(false);
+    expect(untrustedLocalProxy("127.0.0.1", { via: "1.1 x" }, { trustedProxies: ["127.0.0.1"], onFly: false })).toBe(false);
+    expect(untrustedLocalProxy("127.0.0.1", { via: "1.1 x" }, { trustedProxies: [], onFly: true })).toBe(false);
+  });
+
+  test("loopbackSelfRegistrationAllowed: production needs the secret or the opt-in", () => {
+    const base = { loopback: true, selfAgentProof: false, production: true, optIn: false };
+    expect(loopbackSelfRegistrationAllowed(base)).toBe(false);
+    expect(loopbackSelfRegistrationAllowed({ ...base, selfAgentProof: true })).toBe(true);
+    expect(loopbackSelfRegistrationAllowed({ ...base, optIn: true })).toBe(true);
+    expect(loopbackSelfRegistrationAllowed({ ...base, production: false })).toBe(true);
+    expect(loopbackSelfRegistrationAllowed({ ...base, loopback: false, selfAgentProof: true, optIn: true, production: false })).toBe(false);
   });
 
   test("socketRemoteAddress reads the socket, never headers", () => {

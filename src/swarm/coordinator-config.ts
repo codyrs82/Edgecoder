@@ -148,6 +148,11 @@ export const coordinatorConfigSchema = z.object({
   REQUIRE_SIGNED_AGENT_REQUESTS: envFlag({ off: ["false"], ci: true }),
   /** Comma-separated proxy addresses whose forwarded-IP headers are believed. */
   COORDINATOR_TRUST_PROXY: str(),
+  /**
+   * Production only: let any loopback caller without proxy headers /register without a portal
+   * token (a separately run agent on the coordinator's machine). The embedded worker never needs it.
+   */
+  COORDINATOR_LOOPBACK_SELF_REGISTRATION: envFlag({ on: ["true", "1", "on"], ci: true }),
   COORDINATOR_FEE_ACCOUNT: z.string().default("coordinator-fee:default"),
   APPROVED_COORDINATOR_IDS: str(),
   NETWORK_MODE: envEnum(["public_mesh", "enterprise_overlay"]).default("public_mesh"),

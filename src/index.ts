@@ -5,6 +5,7 @@ import { inferenceService } from "./inference/service.js";
 import { coordinatorServer, initCoordinator, installCoordinatorShutdown, startCoordinatorAlerting, startCoordinatorAdminListener } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";
 import { fork } from "node:child_process";
+import { SELF_AGENT_SECRET } from "./swarm/self-agent-secret.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
@@ -73,6 +74,8 @@ function startWorkerProcess(): void {
     LOCAL_MODEL_PROVIDER: workerModelProvider ?? "edgecoder-local",
     // A networked worker relays the IDE's swarm work (signed, billed to this machine's owner).
     ...(NETWORK_COORDINATOR_URL ? { LOCAL_FORWARD_PORT: String(LOCAL_FORWARD_PORT) } : {}),
+    // On this process's own coordinator the worker proves it is the embedded one (self-agent-secret.ts).
+    ...(NETWORK_COORDINATOR_URL ? {} : { EDGECODER_SELF_AGENT_SECRET: SELF_AGENT_SECRET }),
   };
 
   // Forward optional env vars if set

@@ -18,8 +18,11 @@ import {
   clientIpTrustFromEnv,
   isLoopbackSocket,
   socketRemoteAddress,
+  untrustedLocalProxy,
+  loopbackSelfRegistrationAllowed,
   PreAuthFailureCounter
 } from "../coordinator-utils.js";
+import { hasSelfAgentProof } from "../self-agent-secret.js";
 import { SwarmQueue, leaseConfigFromEnv } from "../queue.js";
 import { RemoteGrantBook } from "../remote-grants.js";
 import type { NetworkMode, Subtask, SubtaskResult } from "../../common/types.js";
@@ -244,13 +247,36 @@ export const REQUIRE_AGENT_SIGNED_FORWARDS = requireAgentSignedForwards(process.
 export const PORTAL_SERVICE_URL = CC.PORTAL_SERVICE_URL ?? "";
 /** Which forwarded-IP headers to believe (COORDINATOR_TRUST_PROXY, Fly-Client-IP on Fly). Display/geo only. */
 export const CLIENT_IP_TRUST = clientIpTrustFromEnv(process.env);
-/** The request's network origin: the socket decides loopback; headers only feed the display IP. */
-export function requestOrigin(req: unknown): { clientIp?: string; loopback: boolean } {
+/** COORDINATOR_LOOPBACK_SELF_REGISTRATION: production opt-in for a separately run agent on this machine. */
+export const LOOPBACK_SELF_REGISTRATION_OPT_IN = CC.COORDINATOR_LOOPBACK_SELF_REGISTRATION;
+let warnedUntrustedLocalProxy = false;
+/**
+ * The request's network origin. loopback: the socket is this machine and the request carries no
+ * proxy headers (a same-host proxy relays every internet caller from 127.0.0.1). Headers otherwise
+ * only feed the display IP. selfRegistration: loopback /register may skip the portal (see
+ * loopbackSelfRegistrationAllowed).
+ */
+export function requestOrigin(req: unknown): { clientIp?: string; loopback: boolean; selfRegistration: boolean } {
   const r = req as { headers?: Record<string, unknown>; socket?: { remoteAddress?: string }; raw?: { socket?: { remoteAddress?: string } } };
   const socketIp = socketRemoteAddress(r);
+  const headers = r.headers ?? {};
+  if (!warnedUntrustedLocalProxy && untrustedLocalProxy(socketIp, headers, CLIENT_IP_TRUST)) {
+    warnedUntrustedLocalProxy = true;
+    app.log.warn(
+      { socketIp },
+      "coordinator is behind a reverse proxy on this machine but COORDINATOR_TRUST_PROXY is unset: relayed requests are treated as remote (never loopback) and logged with the proxy's address. Set COORDINATOR_TRUST_PROXY to the proxy's address (e.g. 127.0.0.1) to log client addresses."
+    );
+  }
+  const loopback = isLoopbackSocket(socketIp, CLIENT_IP_TRUST, headers);
   return {
-    clientIp: extractClientIp(r.headers ?? {}, socketIp, CLIENT_IP_TRUST),
-    loopback: isLoopbackSocket(socketIp, CLIENT_IP_TRUST)
+    clientIp: extractClientIp(headers, socketIp, CLIENT_IP_TRUST),
+    loopback,
+    selfRegistration: loopbackSelfRegistrationAllowed({
+      loopback,
+      selfAgentProof: loopback && hasSelfAgentProof(headers),
+      production: isProduction(),
+      optIn: LOOPBACK_SELF_REGISTRATION_OPT_IN
+    })
   };
 }
 export const PORTAL_SERVICE_TOKEN = CC.PORTAL_SERVICE_TOKEN ?? "";
