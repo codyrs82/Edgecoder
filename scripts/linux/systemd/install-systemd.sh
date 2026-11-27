@@ -107,20 +107,29 @@ sed -i.bak "s|__REPO_ROOT__|${REPO_ROOT}|g" "${DST_UNIT}"
 sed -i.bak "s|__NODE_BIN__|${NODE_BIN}|g" "${DST_UNIT}"
 rm -f "${DST_UNIT}.bak"
 
+ENV_FROM_TEMPLATE=0
 if [[ ! -f "${DST_ENV}" ]]; then
   cp "${SRC_ENV}" "${DST_ENV}"
   chown edgecoder:edgecoder "${DST_ENV}"
-  chmod 640 "${DST_ENV}"
+  chmod 600 "${DST_ENV}"
+  ENV_FROM_TEMPLATE=1
   echo "created ${DST_ENV} from template. Update it before production use."
 fi
 
 chown edgecoder:edgecoder "${REPO_ROOT}" || true
 
 systemctl daemon-reload
-systemctl enable --now "${UNIT_NAME}"
-
-echo
-echo "Installed and started ${UNIT_NAME}"
+if [[ "${ENV_FROM_TEMPLATE}" == 1 ]]; then
+  # The template's placeholders can't run: enable only, start after the env file is filled in.
+  systemctl enable "${UNIT_NAME}"
+  echo
+  echo "Installed ${UNIT_NAME} (enabled, not started)."
+  echo "Fill in ${DST_ENV}, then: sudo systemctl start ${UNIT_NAME}"
+else
+  systemctl enable --now "${UNIT_NAME}"
+  echo
+  echo "Installed and started ${UNIT_NAME}"
+fi
 echo "Useful checks:"
 echo "  sudo systemctl status ${UNIT_NAME}"
 echo "  sudo journalctl -u ${UNIT_NAME} -f"
