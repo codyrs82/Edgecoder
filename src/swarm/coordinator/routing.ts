@@ -34,6 +34,7 @@ import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
 import { restrictedCatalog } from "./restricted.js";
 import { agentHeldBack } from "./start-eta.js";
+import { powerRefuses } from "./power-limits.js";
 
 export const bestFitConfig: BestFitConfig = bestFitConfigFromEnv();
 export const complexityWeights: ComplexityWeights = complexityWeightsFromEnv();
@@ -84,7 +85,8 @@ export function agentPerf(agentId: string, claims = queue.activeClaims()): Agent
     verified: rec?.status === "verified" || rec?.status === "base",
     // No capacity while under memory pressure or with its circuit open (memory-admission.ts).
     // Run 8: nor while held back (CPU steal, or not pulling with an idle slot: start-eta.ts agentHeldBack).
-    freeSlots: agentUnavailable(agentId) || agentHeldBack(agentId, claims.get(agentId)?.inference ?? 0) ? 0 : freeModelSlots(agentId, claims),
+    // Network run 22: nor while its power state refuses model calls (a laptop on low battery: power-limits.ts).
+    freeSlots: agentUnavailable(agentId) || agentHeldBack(agentId, claims.get(agentId)?.inference ?? 0) || powerRefuses(agentId, undefined) ? 0 : freeModelSlots(agentId, claims),
     failRate: agentFailRate(agentId) ?? null,
     tierWeight: effectiveHardware(agentId, cap)?.creditsPerSecond ?? 1,
   };
@@ -129,6 +131,9 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
     // clean answer at submit. A host that has not pulled yet (it just registered, or this
     // coordinator just started) is kept: best fit counts it as unproven capacity.
     if (pullStaleWithoutSocket(agentId, nowMs)) continue;
+    // Network run 22 (desktop-maw-mb-02, laptop_battery_low): a host whose power state refuses network
+    // model calls (small tasks only, or none) is not a candidate: it would never claim the call.
+    if (powerRefuses(agentId, undefined, nowMs)) continue;
     // Cloud hosts (src/cloud-host/): best fit sees each online one with the models AUTO_CLOUD_MODELS
     // allows (default: every autoEligible catalog model; "off": none), and places on them only
     // top-tier jobs or jobs nothing else on the network can take (best-fit.ts). Each call spends

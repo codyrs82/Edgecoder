@@ -78,6 +78,7 @@ import { clientIp, parseOriginList, registerPortalSecurity } from "./security.js
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, deleteDnsRecord } from "./dns-manager.js";
 import { createPlatformCoordinatorPicker, parsePlatformCoordinators } from "./platform-coordinators.js";
+import { parseIpIntelligence } from "./ip-intelligence.js";
 import type { CoordinatorRegistryService } from "./coordinator-registry.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
 import { autoRequestHosting, autoRequestHostingSafe, hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
@@ -370,11 +371,8 @@ async function resolveIpIntelligence(sourceIp?: string): Promise<{ countryCode?:
   try {
     const res = await request(url, { method: "GET" });
     if (res.statusCode < 200 || res.statusCode >= 300) return {};
-    const payload = (await res.body.json()) as { country_code?: string; is_vpn?: boolean; is_proxy?: boolean };
-    return {
-      countryCode: payload.country_code,
-      vpnDetected: payload.is_vpn === true || payload.is_proxy === true
-    };
+    // Network run 22: the code may be nested or absent (keyless answer: the country's name only).
+    return parseIpIntelligence(await res.body.json());
   } catch {
     return {};
   }
@@ -830,7 +828,16 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, pickPlatformCoordinator, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+/**
+ * Network run 22: the caller's country for /nodes/discover-coordinator when neither the enrolment nor
+ * the request headers place it (its address as clientIp() reads it; a private address is not looked up).
+ */
+async function lookupCallerCountry(req: FastifyRequest): Promise<string | undefined> {
+  const ip = clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN });
+  if (!ip || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd|fe80)/i.test(ip)) return undefined;
+  return (await resolveIpIntelligence(ip)).countryCode;
+}
+const accountRouteDeps = { lookupCallerCountry, discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, pickPlatformCoordinator, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }

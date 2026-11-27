@@ -67,6 +67,7 @@ import { restrictedClaimAllowed } from "./restricted.js";
 import { circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { agentFlapping, agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
 import { KM_PER_RTT_MS } from "../../common/geo-regions.js";
+import { powerRefuses } from "./power-limits.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -313,6 +314,9 @@ export function ownerOnlyCall(agentId: string, subtask: Subtask): boolean {
 /** An agent that could run `subtask` now, given what it holds. */
 function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
   if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) return false;
+  // Network run 22: a host whose power state refuses the job (a laptop on low battery takes small
+  // jobs only) has no room for it: nobody waits for it, nudges it or holds the call for it.
+  if (powerRefuses(agentId, subtask.timeoutMs, nowMs)) return false;
   if (subtask.kind === "inference") {
     if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs, { ownerOnly: ownerOnlyCall(agentId, subtask) })) return false;
     const free = freeSlots(agentId, claims, false);
@@ -396,6 +400,8 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first, then takes
   // one call at a time (half open) until one succeeds.
   if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) return false;
+  // Network run 22: never claimed only to be handed back for the agent's power state (power-limits.ts).
+  if (powerRefuses(agentId, subtask.timeoutMs, nowMs)) return false;
   if (subtask.kind !== "inference") return true;
   // Host memory: the model must be loaded there (with a free slot for it) or fit its budget headroom
   // (not for the owner's own call on a model the agent keeps off the network: only pressure counts).
@@ -478,6 +484,38 @@ export function preferredAgentFor(subtaskId: string, nowMs = Date.now()): string
  */
 export function releasePreference(subtaskId: string, nowMs = Date.now()): boolean {
   if (!preferred.delete(subtaskId)) return false;
+  nudge(subtaskId, nowMs);
+  return true;
+}
+
+/** Network run 22: the unclaimed calls held for `agentId` right now (their preference names it and is holding). */
+export function callsHeldFor(agentId: string, nowMs = Date.now()): string[] {
+  const out: string[] = [];
+  for (const [id, p] of preferred) if (p.agentId === agentId && preferredAgentFor(id, nowMs) === agentId && queue.isUnclaimed(id)) out.push(id);
+  return out;
+}
+
+/**
+ * Network run 22: places a call again after the host it was held for turned out unable to take it
+ * (its power state refuses it): routes/inference.ts sets the next nearest free host's preference
+ * (locality) for a named call. `refusedBy` is left out of that choice.
+ */
+export type RefusalReplacement = (subtaskId: string, refusedBy: string, nowMs: number) => void;
+let refusalReplacement: RefusalReplacement | undefined;
+export function setRefusalReplacement(fn: RefusalReplacement | undefined): void {
+  refusalReplacement = fn;
+}
+
+/**
+ * The host a call was held for cannot take it: end its hold and place the call again (next nearest
+ * free host for a named call), instead of leaving it to whichever host pulls first. True when a hold
+ * was ended.
+ */
+export function releaseRefusedHold(subtaskId: string, refusedBy: string, nowMs = Date.now()): boolean {
+  const p = preferred.get(subtaskId);
+  if (!p || p.agentId !== refusedBy) return false;
+  preferred.delete(subtaskId);
+  refusalReplacement?.(subtaskId, refusedBy, nowMs);
   nudge(subtaskId, nowMs);
   return true;
 }

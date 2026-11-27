@@ -7,6 +7,7 @@
 import { request } from "undici";
 import { msatToCSats } from "../../../economy/job-pricing.js";
 import { evaluateAgentPowerPolicy } from "../../power-policy.js";
+import { agentPowerDecision, powerLimitReport } from "../power-limits.js";
 import type { CoordinatorApp } from "../app.js";
 import {
   queue,
@@ -174,6 +175,8 @@ export function registerStatusRoutes(app: CoordinatorApp): void {
         connectedPeers: [...info.connectedPeers],
         blacklisted: Boolean(activeBlacklistRecord(agentId)),
         powerPolicy: powerDecision,
+        // Network run 22: which jobs it takes now (acceptsModelCalls false while small tasks only).
+        power: powerLimitReport(agentPowerDecision(agentId)),
         lastSeenMs: info.lastSeenMs,
         orchestrationStatus: orch?.pending && orch?.status ? orch.status : undefined,
         diagnostics: lastDiagnostic

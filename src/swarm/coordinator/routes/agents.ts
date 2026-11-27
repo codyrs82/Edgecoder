@@ -79,6 +79,7 @@ import { meshWsAgentRegistered } from "../mesh-ws-bindings.js";
 import { agentUpdateHint } from "../agent-update-hint.js";
 import { noteAgentHttpAlive } from "../agent-liveness.js";
 import { agentSocketConnected } from "../dispatch.js";
+import { agentPowerDecision, powerLimitReport } from "../power-limits.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -486,6 +487,13 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       // Network run 12: whether this coordinator counts the agent's mesh socket (nudges go down it
       // only then); an agent whose socket is open but not counted reopens it.
       socketConnected: agentSocketConnected(body.agentId),
+      // Network run 22: the jobs this coordinator lets the agent take for its power state (power-limits.ts):
+      // e.g. small jobs only on a low battery (acceptsModelCalls false, maxTaskTimeoutMs). Such an agent
+      // is not counted as a free host for model calls meanwhile.
+      ...(() => {
+        const power = powerLimitReport(agentPowerDecision(body.agentId, now));
+        return power ? { power } : {};
+      })(),
       blacklist: {
         version: mutable.blacklistVersion,
         agents: [...blacklistByAgent.keys()]

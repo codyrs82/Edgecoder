@@ -31,8 +31,29 @@ export interface PowerPolicyDecision {
   allowCoordinatorTasks: boolean;
   allowPeerDirectWork: boolean;
   allowSmallTasksOnly?: boolean;
+  /**
+   * With allowSmallTasksOnly: the longest job (its timeoutMs) the agent takes now; a longer one is
+   * refused (SMALL_TASK_MAX_TIMEOUT_MS). Model calls run with far longer limits, so a host here takes
+   * no network model calls.
+   */
+  maxTaskTimeoutMs?: number;
   deferMs?: number;
   reason: string;
+}
+
+/** The longest job (timeoutMs) a laptop on low battery still takes ("small tasks only"). */
+export const SMALL_TASK_MAX_TIMEOUT_MS = 10_000;
+
+/**
+ * Whether an agent under this power decision takes a job with this timeout. A short deferral
+ * (deferMs, high CPU) is not a refusal: the agent takes the job on its next pull.
+ */
+export function powerAllowsTask(decision: PowerPolicyDecision | undefined, timeoutMs: number | undefined): boolean {
+  if (!decision) return true;
+  if (!decision.allowCoordinatorTasks) return false;
+  if (!decision.allowSmallTasksOnly) return true;
+  const max = decision.maxTaskTimeoutMs ?? SMALL_TASK_MAX_TIMEOUT_MS;
+  return timeoutMs !== undefined && timeoutMs <= max;
 }
 
 /** An iOS agent: the iOS app registers with os "ios" and clientType "edgecoder-ios"; mesh-gossip phones are stored with os "ios". */
@@ -118,6 +139,7 @@ export function evaluateAgentPowerPolicy(input: PowerPolicyInput): PowerPolicyDe
         allowCoordinatorTasks: true,
         allowPeerDirectWork: false,
         allowSmallTasksOnly: true,
+        maxTaskTimeoutMs: SMALL_TASK_MAX_TIMEOUT_MS,
         reason: "laptop_battery_low"
       };
     }

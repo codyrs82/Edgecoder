@@ -29,7 +29,8 @@ import {
 } from "../../result-integrity.js";
 import { executorKey, type ExecutionResult, type VerificationOutcome } from "../../verification.js";
 import { resultModelMismatch } from "../../model-catalog.js";
-import { evaluateAgentPowerPolicy, iosAgentNotCharging } from "../../power-policy.js";
+import { evaluateAgentPowerPolicy, iosAgentNotCharging, powerAllowsTask } from "../../power-policy.js";
+import { noteAgentOutcome } from "../routing.js";
 import {
   createTaskEnvelope,
   type EncryptedResult,
@@ -132,7 +133,7 @@ import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferen
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
-import { agentLoadReport, claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed, preferredAgentFor } from "../dispatch.js";
+import { agentLoadReport, callsHeldFor, claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed, preferredAgentFor, releaseRefusedHold } from "../dispatch.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -415,6 +416,21 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       if (powerDecisionForPull.deferMs && powerDecisionForPull.deferMs > 0) {
         return reply.send({ subtask: null, powerDeferred: true, deferMs: powerDecisionForPull.deferMs, reason: powerDecisionForPull.reason });
       }
+      // Network run 22 (desktop-maw-mb-02, laptop_battery_low): a call held for this host that its
+      // power state refuses (it became small-tasks-only after the call was placed) is not claimed and
+      // handed back: its hold ends here and the call is placed again on the next nearest free host.
+      // Each one counts as a failed call for the host (routing.ts agentFailRate), so a host that keeps
+      // turning calls down stops being offered as a free host (#621, FREE_HOST_MAX_FAIL_RATE).
+      if (powerDecisionForPull.allowSmallTasksOnly) {
+        const nowHold = Date.now();
+        for (const subtaskId of callsHeldFor(body.agentId, nowHold)) {
+          const st = queue.getSubtask(subtaskId);
+          if (!st || powerAllowsTask(powerDecisionForPull, st.timeoutMs)) continue;
+          if (!releaseRefusedHold(subtaskId, body.agentId, nowHold)) continue;
+          if (st.kind === "inference") noteAgentOutcome(body.agentId, false);
+          app.log.info({ subtaskId, taskId: st.taskId, agentId: body.agentId, reason: powerDecisionForPull.reason, timeoutMs: st.timeoutMs }, "power_small_task_filter");
+        }
+      }
     }
     // #45: code subtasks need a sandbox. An agent without one claims inference subtasks only
     // (they run a model, never task code); the rule is applied inside claim() below, so nothing
@@ -496,12 +512,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         void pgStore?.persistMarketTrade(trade).catch(() => undefined);
       }
 
-      // ── Power policy: small-tasks-only check ──
-      if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
-        app.log.info({ subtaskId: task.id, agentId: body.agentId, reason: powerDecisionForPull.reason }, "power_small_task_filter");
-        queue.requeue(task.id);
-        return reply.send({ subtask: null, powerDeferred: true, reason: powerDecisionForPull.reason });
-      }
+      // Power policy (small tasks only on a low battery): applied in mayTakeNow (power-limits.ts), so a
+      // job this agent may not run is never claimed and handed back here.
 
       lastTaskAssignedByAgent.set(body.agentId, Date.now());
       behaviorTracker.recordTaskClaim(body.agentId);
